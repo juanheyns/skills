@@ -5,10 +5,10 @@ listed in `references/sources.md`. "I guess" marks a decision that is my judgmen
 
 ## Inputs
 
-- **Only the stage 1 report was used.** The task allowed the stage 2 guide for humans if it had landed when work
-  started. On 2026-10-23 it was not on the main branch of the research repo, so this skill is built from the stage 1
-  report only (34 pre-2023 sources, 18 agent-era sources). When the guide lands, compare the two and open an issue
-  for any gap.
+- **First the stage 1 report, then the stage 2 guide.** When work started on 2026-10-23, the stage 2 guide for
+  humans was not on the main branch of the research repo, so the first version of the skill was built from the
+  stage 1 report only (34 pre-2023 sources, 18 agent-era sources). The guide then landed (research commit
+  `a3bc6c8`), and the skill was checked against it in the same PR. See "Alignment with the stage 2 guide" below.
 - **The report is not public.** For this reason, `references/sources.md` repeats the source list with public links,
   so a reader of this repo can check each key without the report.
 - **The report paraphrases its sources.** It quotes no prose from them. The skill also paraphrases. Where a rule says
@@ -26,9 +26,10 @@ listed in `references/sources.md`. "I guess" marks a decision that is my judgmen
    one install. The cost is a larger SKILL.md (about 200 lines, under the 500-line limit) and a name, `pr-review`,
    that is narrower than the content; the trigger description names all three jobs to fix that. I guess.
 2. **Same standard for human and agent authors.** The skill does not ask for a different review of agent PRs. A01
-   says to judge code on its merits, not on presumed authorship; A09's "1.7x more problems" is a vendor number on
-   classified samples that the report does not endorse as a general effect. The agent-era risks (large PRs, unread
-   code, tests that do not prove) are covered by rules that apply to everyone: AU2, AU6, AU7 and the test checklist.
+   says to judge code on its merits, not on presumed authorship. A09's "10.83 versus 6.45 issues per PR in 470
+   selected PRs" is a vendor number on classified samples that the report does not endorse as a general effect. The
+   agent-era risks (large PRs, unread code, tests that do not prove) are covered by rules that apply to everyone: AU2,
+   AU6, AU7 and the test checklist.
 3. **The skill is for one review by one reviewer.** It does not decide how many reviewers a team needs, who routes
    reviews, or code-owner settings. Reviewer count is unresolved in the report (P08, P12, P14, P28, P01, P03, P16),
    and routing is a team or supervisor job. AU11 only asks the author to request the right person.
@@ -55,8 +56,9 @@ listed in `references/sources.md`. "I guess" marks a decision that is my judgmen
    takes a strict side: never merge or approve unless told to, and a PASS is a recommendation (G3). Reasons: the
    author stays accountable (A12), the report finds the safety of unattended merging unresolved, and it fits the
    current review loop. I guess.
-2. **Size limits vs judgment.** P06 (Cisco) gives under 200 and at most 400 lines. P21 prefers changes that are
-   complete in concept. The report finds no universal ceiling. The skill uses 200/400 as a signal and lets a larger
+2. **Size limits vs judgment.** P06 (Cisco) gives under 200 and at most 400 lines. P21 prefers a change that is
+   complete as an idea. The report finds no universal ceiling. The skill uses 200/400 as a default that starts a
+   conversation, not a hard gate, and lets a larger
    change through with a reason in the description (AU2). Size is not blocking by itself; it blocks only when it
    stops a real review (the `question (blocking)` rule under the verdict). I guess.
 3. **Formality.** P01 and P03 favor formal inspections; P08 and P12 describe light, asynchronous review as a success;
@@ -71,7 +73,8 @@ listed in `references/sources.md`. "I guess" marks a decision that is my judgmen
    author did not understand generated code; P07 and P14 count learning as a main outcome. The skill keeps "explain
    the principle" (RV11) and makes the author responsible for understanding every line (AU7).
 7. **Conventional Comments vocabulary.** P20's wording for nitpicks changed over time, and the report says a label
-   alone does not settle blocking policy. The skill uses its own five labels and always writes the decoration (LB1,
+   alone does not settle blocking policy. The skill uses the guide's five labels (`praise`, `issue`, `suggestion`,
+   `question`, `nitpick`; only `praise` and `nitpick` are confirmed by P20) and always writes the decoration (LB1,
    LB2).
 
 ## Agent-era practices
@@ -98,14 +101,17 @@ Rejected:
 
 ## Gaps in the report, filled by the review loop or judgment
 
-The report has no rule for these, so each one is S or J:
+The report has no rule for these, so each one is S or J. The guide lists several of them as gaps too (escalation,
+"approve with comments", follow-up tickets, merge mechanics, label set, when to talk):
 
 - the verdict states and the exact verdict line (RV13);
 - the number of rounds and when to stop (RV15, RV17);
 - the escalation path to a human (RE7, RV17);
 - a PR description template (only the content is sourced; the layout is J);
 - how an author handles review findings from an agent, and wrong findings (RE2);
-- the limit of 5 non-blocking findings (RV9: I guess, to answer the "verbose AI review" complaint in A03).
+- the limit of 5 non-blocking findings (RV9: I guess, to answer the "verbose AI review" complaint in A03; kept after
+  the supervisor's review on 2026-10-23, still marked as judgment);
+- out-of-scope ideas go to a follow-up issue (AU5), and squash only if the repo asks (RE4).
 
 ## Format choices
 
@@ -144,8 +150,9 @@ Same as the current process:
 Different from the current process:
 
 - **Labels.** The current process has two levels, blocking (the default) and `nit`. The skill has five labels and an
-  explicit decoration on each finding. It stays compatible: a nit is still written `nit`, and the verdict rule is the
-  same. A supervisor that counts blocking findings can count `(blocking)`.
+  explicit decoration on each finding. It stays compatible: a nit is written `nitpick (non-blocking)`, which still
+  marks it as a nit, and the verdict rule is the same. A supervisor that counts blocking findings can count
+  `(blocking)`.
 - **Order.** The current list starts with correctness. The skill puts intent, scope and design first, because P23
   says to start with large design problems and P07 says understanding is the main difficulty. Scope moves from near
   the end to near the start.
@@ -159,6 +166,49 @@ Different from the current process:
 - **Not in the skill:** repos where a review bot is the only reviewer, the supervisor's board and scoring, which
   model reviews which, and whether to use subagents. These are the supervisor's choices. The current process
   documents also disagree about subagents, so the skill says nothing about them.
+
+## Alignment with the stage 2 guide
+
+The guide (research commit `a3bc6c8`) is for humans; the skill is for agents. Both come from the same report. Each
+difference was checked. Where there was no reason for it, the skill now uses the guide's words.
+
+Aligned with the guide:
+
+- **Labels:** `nitpick`, not `nit` (P20 confirms `nitpick`). Table order as in the guide. Format
+  `label (decoration): subject`, with a colon. `praise` has no decoration.
+- **PR template headings:** Why, What changed, Context, How I tested it, Screenshots, Risk and where to look first,
+  Checklist, with the guide's four checklist boxes.
+- **Words:** "better code health, not perfect code" (RV10); "a stack of dependent PRs" (AU3); "complete as an idea"
+  and "a default that starts a conversation, not a hard gate" (AU2); "Nits" for the last review step (RV4);
+  "the code owner or the maintainer with merge authority" for the human owner (RE7, RV17); "follow-up issue" (AU5).
+- **Rules the skill did not have:** assume competence and goodwill, offer alternatives, opinion vs principle, do not
+  bikeshed (G5); do not pass under pressure (RV10); PASS with only non-blocking findings needs no new round (RV13);
+  scale review depth to impact and reversibility (RV4, A15); resource leaks, threading and performance in the
+  correctness step (RV4); check each agreed correction (RE5); split the PR when review shows it is too big (RE9).
+- **Disagreement:** escalate after two exchanges, not one, as the guide's "more than twice" guess (RE7).
+- **Keys:** added where the guide cites a key for the same rule (AU2: P22, P28, A01; AU11: P17; CL1: P26; RE1: P15;
+  RE5: P01, P04; RV10: A03, P14; template sections).
+
+Kept different, with the reason:
+
+| Guide | Skill | Reason |
+| --- | --- | --- |
+| Decoration is optional; `question` "as needed" | Every numbered finding has one | A caller counts `(blocking)`; the report says a label alone does not decide what blocks. S, J. |
+| No default decoration for `issue` or `suggestion` | `issue` blocks and `suggestion` does not, by default; three conditions for a non-blocking `issue` | An agent needs a default; the self-test showed the line was unclear without one. J. |
+| Unlimited "sincere praise" | At most one specific `praise` line, not numbered | The current review loop is critical only; one line keeps the review short. J. |
+| Order: design, correctness (with security), tests, readability, nits | Intent and scope first; security is its own step after tests | Intent first: P07 (understanding is the main difficulty) and the review loop's "does it do what the issue asks". Security on its own: an agent is less likely to skip it, and the review loop lists it on its own. J. |
+| "Approve", "sign-off" | `Review round <n>: PASS` / `CHANGES NEEDED`; never approve unless told to | Agents must not approve or merge (G3); the verdict line is what the review loop reads. S. |
+| "Merge after sign-off and green CI" | Do not merge; do not wait for the merge (G3, RE8) | A human owner merges. S. |
+| Move to a call or meeting when it gets long | Ask the human owner to decide | An agent cannot hold a call. J. |
+| No round limit | 3 rounds, then the human (RV17) | From the review loop; no source gives a number. S. |
+| Turnaround (one business day, "hours, not days") and session time (under 60, at most 90 minutes) | Left out | Agents review when asked and do not tire the same way. J. See "Left out". |
+| Team sections: ownership, CODEOWNERS, metrics, pairing, the disagreement table | Left out | The skill is for one review by one agent (scope 3). |
+| "Short, focused checklists"; a giant list distracts | A checklist of about 40 lines in 8 sections | It is a reminder loaded on demand, and the reviewer reports only what it finds. The repo's own list comes first. J. |
+| Comments are not about you; give reviewers time | Not in the responder mode | For a human author's feelings and a human reviewer's time; the skill's tone rule (G5) is on the reviewer side. J. |
+| A rubric for judging an AI reviewer (actionable findings, false positives, missed defects, human effort) | Not a rule | A team-level evaluation, not a step in one review. RV7 covers false positives within a review. |
+| Agent-era tags: opinion / vendor / data | D / I / U / S / J, plus a source-type column in `references/sources.md` | The skill needs to show which rules are its own judgment (J) and which come from the review loop (S). |
+| "I guess" covers both the report's inferences and the guide's guesses | I (report inference) and J (my judgment) are separate | Finer; a reader can tell whose guess it is. |
+| Template has no rollback or title rule | Rollback in "Risk and where to look first"; a title rule | A reviewer needs to know how to undo the change; a clear title helps triage. J. |
 
 ## Self-test
 

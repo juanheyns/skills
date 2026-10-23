@@ -7,7 +7,7 @@ The repo's own checklist (in AGENTS.md, CONTRIBUTING, the PR template or a revie
 problem gets past review and is found later, add a line for it to the repo's checklist, not to a longer list here
 (CL1).
 
-## 0. Context
+## 0. Understand the change
 
 - [ ] I can say in one or two sentences what the PR does and why.
 - [ ] I read the linked issue, its "done when" items and the ADRs the change touches.
@@ -34,7 +34,8 @@ problem gets past review and is found later, add a line for it to the repo's che
 
 - [ ] Edge cases: empty, one, many, maximum, duplicates, unicode, time zones, negative, missing.
 - [ ] Errors are handled where they occur, not swallowed. Error messages help the user.
-- [ ] Resources are bounded and released: memory, file handles, connections, locks, caches, queues.
+- [ ] No resource leaks; resources are bounded and released: memory, file handles, connections, locks, caches,
+      queues.
 - [ ] Concurrency: shared state, ordering, races, retries, idempotency, timeouts.
 - [ ] Data: migrations are safe to run on real data and to run twice; old and new versions can run at the same time
       during a deploy.
@@ -68,7 +69,7 @@ problem gets past review and is found later, add a line for it to the repo's che
 - [ ] Comments explain why, not what. No commented-out code.
 - [ ] Docs, README, CHANGELOG and ADRs are updated where the repo requires it.
 
-## 7. Polish
+## 7. Nits
 
-- [ ] Style issues are `nit (non-blocking)` at most.
+- [ ] Small style points are `nitpick (non-blocking)` at most.
 - [ ] A nit that occurs many times is one finding that asks for a tool or a style rule.

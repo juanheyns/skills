@@ -1,6 +1,8 @@
 # Self-test: a real review made with this skill
 
-`brnr-366-review-round-1.md` is the output of the reviewer mode, unchanged, on a real merged PR:
+`brnr-366-review-round-1.md` is the output of the reviewer mode, unchanged, on a real merged PR. It was made before
+the labels were aligned with the stage 2 guide, so it writes `issue (non-blocking) — path` where the skill now writes
+`issue (non-blocking): path —`. The PR:
 [brnrhq/brnr#366](https://github.com/brnrhq/brnr/pull/366) ("The host keeps at most 1024 requests the agent cancelled
 under the editor, and drops a session's as it closes"). It is +126 / −27 lines in 5 files: Rust code, an ADR and the
 CHANGELOG. The `#362` and `#364` in the review are PRs and issues of that repo, not of this one.
@@ -22,7 +24,8 @@ The review was not posted anywhere. It is here to show the format.
 - **Finding 1 is real.** At the PR head, `give_up` adds the cancelled request to the capped queue (and so can push
   out the oldest entry, from a session that is still open), and only after that does `agent_cancel` remove the new
   entry because its session is closed. I checked this against the code at commit `9111792`. It matters only at the
-  cap, so non-blocking is the right decoration.
+  cap, so non-blocking is the right decoration. It is now filed as
+  [brnrhq/brnr#387](https://github.com/brnrhq/brnr/issues/387).
 - **Comparison with the repo's review bot.** The bot reviewed an earlier head and posted two findings. One (a cancel
   kept past its session's close) was fixed in `9111792`, the head this test reviewed, so the skill could not find
   it. The other (a reopened session) the bot withdrew after the author's answer; the skill did not raise it. The
