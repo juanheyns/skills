@@ -1,0 +1,24 @@
+{
+  "name": "baseline: default branch",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": "{bypass_actors}",
+  "conditions": {
+    "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] },
+    "repository_name": { "include": ["~ALL"], "exclude": [], "protected": false }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": "{review_count}",
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": "{require_code_owner_review}",
+        "require_last_push_approval": "{require_last_push_approval}",
+        "required_review_thread_resolution": true
+      }
+    }
+  ]
+}
