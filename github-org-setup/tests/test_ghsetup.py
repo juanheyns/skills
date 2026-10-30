@@ -577,6 +577,148 @@ class TestExplain(unittest.TestCase):
         self.assertIn("outside collaborators without 2FA (removed): none", detail)
 
 
+class TestPinRefresh(unittest.TestCase):
+    TEXT = ("      - uses: actions/checkout@" + "1" * 40 + " # v7.0.1\n"
+            "      - uses: github/codeql-action/upload-sarif@" + "2" * 40 + " # v4.39.1\n"
+            "      - uses: ./local\n")
+
+    def gh(self, broken=False):
+        routes = {("GET", "/repos/actions/checkout/tags?per_page=100"): (200, [
+            {"name": "v8.0.0", "commit": {"sha": "8" * 40}}, {"name": "v7.1.0", "commit": {"sha": "7" * 40}},
+            {"name": "v7.0.1", "commit": {"sha": "1" * 40}}, {"name": "v7", "commit": {"sha": "x" * 40}}])}
+        if not broken:
+            routes[("GET", "/repos/github/codeql-action/tags?per_page=100")] = (200, [
+                {"name": "codeql-bundle-v2.27.3", "commit": {"sha": "b" * 40}},
+                {"name": "v4.39.1", "commit": {"sha": "2" * 40}}])
+        return ghsetup.Gh(FakeGitHub(routes))
+
+    def test_same_major_latest(self):
+        new, notes = ghsetup.refresh_pins(self.TEXT, self.gh())
+        self.assertIn("actions/checkout@" + "7" * 40 + " # v7.1.0\n", new, "latest v7, not v8")
+        self.assertIn("upload-sarif@" + "2" * 40 + " # v4.39.1", new, "already latest: unchanged")
+        self.assertIn("./local", new)
+        self.assertEqual([lvl for lvl, _ in notes], ["info"])
+
+    def test_lookup_failure_keeps_pin(self):
+        new, notes = ghsetup.refresh_pins(self.TEXT, self.gh(broken=True))
+        self.assertIn("upload-sarif@" + "2" * 40, new)
+        self.assertIn("warn", [lvl for lvl, _ in notes])
+
+    def test_scorecard_template_has_read_permissions(self):
+        with open(os.path.join(ghsetup.TEMPLATES_DIR, "scorecard.yml")) as f:
+            text = f.read()
+        job = text.split("jobs:", 1)[1]
+        for perm in ("contents: read", "actions: read", "security-events: write", "id-token: write"):
+            self.assertIn(perm, job)
+        self.assertEqual(len([l for l in text.splitlines() if ghsetup.PIN_RE.match(l)]), 4, "every pin is refreshable")
+
+
+class TestSecurityContact(unittest.TestCase):
+    FINDINGS = {"results": [{"scope": "repo", "target": "acme/secret", "visibility": "private"},
+                            {"scope": "repo", "target": "acme/api", "visibility": "public"}]}
+
+    def test_modes(self):
+        line, notes = ghsetup.derive_security_contact({"security_contact": "sec@acme.org"}, self.FINDINGS)
+        self.assertEqual(line, "If that is not available, send an email to <sec@acme.org>.")
+        line, _ = ghsetup.derive_security_contact({"security_contact": "https://acme.org/security"}, self.FINDINGS)
+        self.assertIn("<https://acme.org/security>", line)
+        line, notes = ghsetup.derive_security_contact({"security_contact": "advisories"}, self.FINDINGS)
+        self.assertEqual(line, "")
+        self.assertIn("acme/secret", notes[0][1])
+        with self.assertRaises(ghsetup.MissingParams):
+            ghsetup.derive_security_contact({"security_contact": "call Bob"}, self.FINDINGS)
+
+    def test_file_always_has_a_link(self):
+        with open(os.path.join(ghsetup.TEMPLATES_DIR, "SECURITY.md")) as f:
+            template = f.read()
+        for contact in ("advisories", "sec@acme.org", "https://acme.org/security"):
+            line, _ = ghsetup.derive_security_contact({"security_contact": contact}, {"results": []})
+            text = ghsetup.fill(template, {"contact_line": line, "ack_days": 3, "assess_days": 10})
+            self.assertRegex(text, r"https://docs\.github\.com/\S+report-privately")
+            self.assertNotRegex(text, r"\{[a-z_]+\}")
+
+
+class TestVerify(unittest.TestCase):
+    CAT = {"verified_on": "x", "plans": ["free", "team"], "products": {}, "checks": [
+        {"id": "REPO-DEL", "scope": "repo", "title": "t", "kind": "field", "availability": {"free": "free"},
+         "read": {"path": "/repos/{owner}/{repo}", "pointer": "delete_branch_on_merge"},
+         "expect": {"op": "eq", "value": True}, "fix": {"kind": "api", "steps": []}},
+        {"id": "REPO-FILE", "scope": "repo", "title": "t", "kind": "file_any", "availability": {"free": "free"},
+         "read": {"paths": ["SECURITY.md"]}, "fix": {"kind": "pr_file"}}]}
+
+    def findings(self):
+        return {"org": "acme", "plan": "free", "results": [
+            {"key": "REPO-DEL@acme/api", "id": "REPO-DEL", "target": "acme/api", "scope": "repo", "visibility": "public"},
+            {"key": "REPO-FILE@acme/api", "id": "REPO-FILE", "target": "acme/api", "scope": "repo",
+             "visibility": "public"}]}
+
+    def test_retries_stale_reads(self):
+        answers = iter([{"delete_branch_on_merge": False}, {"delete_branch_on_merge": True}])
+
+        def runner(args, stdin=None):
+            return 0, json.dumps(next(answers)), ""
+        slept = []
+        res = ghsetup.verify(ghsetup.Gh(runner), self.CAT, self.findings(), {"REPO-DEL@acme/api"},
+                             delay=0.5, sleep=slept.append)
+        self.assertEqual(res[0]["status"], "pass")
+        self.assertEqual(slept, [0.5])
+
+    def test_pr_fix_is_pending(self):
+        gh = ghsetup.Gh(FakeGitHub({}))
+        res = ghsetup.verify(gh, self.CAT, self.findings(), {"REPO-FILE@acme/api"},
+                             {"REPO-FILE@acme/api": "https://github.com/acme/api/pull/7"}, sleep=lambda s: None)
+        self.assertEqual(res[0]["status"], "pending-pr")
+        self.assertIn("/pull/7", res[0]["detail"])
+
+
+class TestDependencyCoverage(unittest.TestCase):
+    CHECK = {"id": "REPO-COV", "scope": "repo", "title": "t", "kind": "dependency_coverage",
+             "availability": {"free": "free", "team": "free"},
+             "read": {"lockfiles": ["Cargo.lock", "bun.lock", "package-lock.json"]}, "fix": {"kind": "manual"},
+             "manual": "m"}
+    CAT = {"verified_on": "x", "plans": ["free", "team"], "products": {}, "checks": [CHECK]}
+
+    def routes(self, manifests):
+        tree = {"truncated": False, "tree": [{"path": "Cargo.lock", "type": "blob"},
+                                             {"path": "adapters/bun.lock", "type": "blob"},
+                                             {"path": "adapters/package.json", "type": "blob"},
+                                             {"path": "src", "type": "tree"}]}
+        data = {"data": {"repository": {"dependencyGraphManifests": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [{"filename": m, "parseable": True} for m in manifests]}}}}
+        return base_routes({
+            ("GET", "/orgs/acme/repos?type=all&per_page=100"): (200, REPOS[:2]),
+            ("GET", "/repos/acme/api/git/trees/main?recursive=1"): (200, tree),
+            ("GET", "/repos/acme/secret/git/trees/main?recursive=1"): (200, tree),
+            ("POST", "/graphql"): (200, data),
+            ("GET", "/repos/acme/api/dependabot/alerts?state=open&per_page=100"): (200, []),
+        })
+
+    def test_uncovered_lockfile_and_osv_gap(self):
+        real = ghsetup.scorecard_vulnerabilities
+        ghsetup.scorecard_vulnerabilities = lambda repo: {"count": 12, "date": "2026-10-30T00:00:00Z"}
+        try:
+            findings, _ = run_audit(self.routes(["Cargo.lock", "adapters/package.json"]), catalog=self.CAT)
+        finally:
+            ghsetup.scorecard_vulnerabilities = real
+        r = by_key(findings)
+        pub, priv = r["REPO-COV@acme/api"], r["REPO-COV@acme/secret"]
+        self.assertEqual(pub["status"], "fail")
+        self.assertEqual(pub["current"]["uncovered"], ["adapters/bun.lock"])
+        self.assertIn("Scorecard (OSV) found 12 vulnerabilities", pub["detail"])
+        self.assertIn("Dependabot has 0 open alert(s)", pub["detail"])
+        self.assertNotIn("Scorecard", priv["detail"], "no Scorecard lookup for private repos")
+
+    def test_all_covered_passes(self):
+        real = ghsetup.scorecard_vulnerabilities
+        ghsetup.scorecard_vulnerabilities = lambda repo: None
+        try:
+            findings, _ = run_audit(self.routes(["Cargo.lock", "adapters/bun.lock"]), catalog=self.CAT)
+        finally:
+            ghsetup.scorecard_vulnerabilities = real
+        self.assertEqual(by_key(findings)["REPO-COV@acme/api"]["status"], "pass")
+
+
 class TestWorkflows(unittest.TestCase):
     WF = ("name: ci\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n"
           "      - uses: actions/checkout@v4\n"

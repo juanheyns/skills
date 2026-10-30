@@ -94,6 +94,30 @@ in code (`PRECONDITIONS` in `scripts/ghsetup.py`), not only a sentence in SKILL.
    `draft: true`. `gh release create` with the files passes: gh uploads before it publishes. This is a line-based
    heuristic, not a YAML parser; it can miss uploads done through scripts or other actions.
 
+Medium items from the same run:
+
+6. **The Scorecard workflow template could not see the rulesets.** Repos with the template scored
+   Branch-Protection 0 ("not enabled"), though rulesets with `deletion` and `non_fast_forward` existed before the
+   runs (`.github`: ruleset at about 19:03Z, run at 19:20Z). `brnr`'s own workflow, with job-level `contents: read`
+   and `actions: read`, scores 5. A job-level `permissions:` block replaces the workflow's `read-all`, and the
+   template granted only the two write scopes. The template now adds the reads that the scorecard-action v2.5.0
+   README recommends (`contents`, `issues`, `pull-requests`, `checks`) plus `actions: read`. This is the most likely
+   cause, not a proven one; the next runs after homebrew-tap #11 and .github #4 merge will show it. Its action pins
+   are refreshed at plan time to the latest release of the same major version (a new major can change inputs).
+7. **SECURITY.md without a working contact.** "Send an email to {security_contact}" read wrongly for a URL, and
+   removing the line costs 6 Scorecard points because the file has no link. The template now always links GitHub's
+   private reporting docs, and `security_contact` takes an email, a URL, or `advisories`; anything else is refused.
+8. **Verify reported false failures.** `delete_branch_on_merge` read the old value right after the PATCH. Verify
+   now reads a failed check again (twice, 3 s apart by default). PR fixes show `pending-pr <url>`.
+9. **Dependabot did not cover every lockfile.** Dependabot had 0 alerts while OSV found 12 issues in
+   `adapters/bun.lock`. The dependency graph parsed `adapters/package.json` but not `bun.lock`; the dependency graph
+   ecosystem table has no Bun row, while Dependabot version updates support `bun.lock`. `REPO-DEPENDENCY-COVERAGE`
+   compares the lockfiles in the git tree with GraphQL `dependencyGraphManifests`, so it stays right when GitHub
+   adds an ecosystem; the catalog only lists lockfile names to look for. `go.sum` is not on that list, because for
+   Go the dependency graph reads `go.mod`; `uv.lock` is, and like `bun.lock` it has no row in the ecosystem table
+   today. For public repos it also compares
+   Dependabot's open alerts with Scorecard's (OSV) count. The fix is manual: the options depend on the ecosystem.
+
 **Scorecard's docs and code disagree on bot reviews.** `docs/checks.md` (v5.6.0, lines 221–223) says reviews by
 bots do not count as code review. The code counts any `APPROVED` review whose author is not the changeset author
 (`probes/codeApproved/impl.go`, `approved()`), with no bot test on the reviewer. It marks only *authors* as bots,

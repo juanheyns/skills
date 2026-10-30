@@ -1,5 +1,6 @@
 # OpenSSF Scorecard: https://github.com/ossf/scorecard-action
 # Publishing rules: no top-level env/defaults, no workflow-level write permissions, only these steps in the job.
+# ghsetup.py refreshes the pinned SHAs below to the latest release of the same major version when it opens the PR.
 name: Scorecard supply-chain security
 on:
   branch_protection_rule:
@@ -15,8 +16,16 @@ jobs:
     name: Scorecard analysis
     runs-on: ubuntu-latest
     permissions:
+      # Required to publish results (badge, API, code scanning).
       security-events: write
       id-token: write
+      # Job-level permissions replace the workflow's `read-all`. Without these reads, Scorecard cannot see the
+      # rulesets (Branch-Protection scored 0 "not enabled") and parts of the other checks.
+      contents: read
+      actions: read
+      issues: read
+      pull-requests: read
+      checks: read
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

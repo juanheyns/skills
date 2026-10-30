@@ -46,6 +46,15 @@ read-only API response (org `brnrhq`, Free plan, 2026-10-30); **J** my judgment 
   `type`); `GET /repos/{o}/{r}/keys` returns deploy keys with `read_only`.
 - `actions-in-use brnrhq` gave the same 12 third-party patterns that the test session found by hand, including
   subdirectory actions (`google/clusterfuzzlite/actions/build_fuzzers`) and actions nested in composite actions.
+- GraphQL `Repository.dependencyGraphManifests` (public schema, https://docs.github.com/public/fpt/schema.docs.graphql)
+  lists the files the dependency graph parsed. For `brnrhq/brnr` it lists `adapters/package.json` but not
+  `adapters/bun.lock`; Dependabot had 0 open alerts and Scorecard (OSV) 12 vulnerabilities on 2026-10-30.
+- Scorecard Branch-Protection was 0 ("not enabled") on `homebrew-tap` and `.github` (template workflow: job
+  permissions `security-events: write`, `id-token: write` only) and 5 on `brnr` (job permissions add
+  `contents: read`, `actions: read`), with rulesets in place before the runs. scorecard-action v2.5.0 README lines
+  100–108 recommend `contents`, `issues`, `pull-requests` and `checks: read` in the job.
+- The private reporting docs moved: the old URL answers 301 to
+  `https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately`.
 - Scorecard v5.6.0 reads `SECURITY.md` from the org `.github` repo if the repo has none
   (`checks/raw/security_policy.go`, lines 61–79), and counts `.github/dependabot.yml` and Renovate files
   (`checks/raw/dependency_update_tool.go`). Pinned action SHAs from the template were resolved live with `pin`.
@@ -62,6 +71,7 @@ read-only API response (org `brnrhq`, Free plan, 2026-10-30); **J** my judgment 
 | REST API for 2FA, OAuth app restrictions, PAT policy, member privileges | Treated as UI only (`manual`) |
 | How GitHub matches `patterns_allowed` (case, `owner/*`, subpaths) | `allowed_by_patterns` approximates it with case-insensitive globs; the suggested list uses exact `owner/repo[/path]@*` entries |
 | Whether the Actions allow policy and SHA pinning apply inside third-party composite actions | The scan follows them; for SHA pinning, nested tags are a `warn`, not a `block` |
+| That the missing job-level reads caused Branch-Protection 0 | Most likely cause (see DECISIONS.md item 6); confirm after the next Scorecard runs |
 | Marketplace "verified creator" status | No API. With `verified_allowed=true` the blocked list can include actions that would still run; the skill says so |
 | Whether Scorecard counts the repo/org "read-only GITHUB_TOKEN default" | It does not (Scorecard: "no API available"); the skill checks both the setting and the workflow files |
 

@@ -155,6 +155,7 @@
         "template": "SECURITY.md",
         "message": "Add a default security policy for the organization",
         "params": {"security_contact": null, "ack_days": 3, "assess_days": 10},
+        "derive": {"contact_line": "security_contact"},
         "create_repo": {"name": ".github", "visibility": "public", "auto_init": true,
                         "description": "Default community health files for the organization"}
       },
@@ -538,6 +539,29 @@
       ]
     },
     {
+      "id": "REPO-DEPENDENCY-COVERAGE",
+      "scope": "repo",
+      "title": "Every lockfile is in the dependency graph, so Dependabot alerts cover it",
+      "severity": "medium",
+      "kind": "dependency_coverage",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"lockfiles": ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock",
+                             "bun.lockb", "deno.lock", "Cargo.lock", "poetry.lock", "uv.lock", "Pipfile.lock",
+                             "pdm.lock", "Gemfile.lock", "composer.lock", "packages.lock.json", "gradle.lockfile",
+                             "pubspec.lock", "Package.resolved", "Manifest.toml", "mix.lock", "conan.lock",
+                             ".terraform.lock.hcl", "MODULE.bazel.lock"],
+               "note": "Lockfiles that pin resolved versions. go.sum is not listed: for Go the dependency graph reads go.mod."},
+      "fix": {"kind": "manual"},
+      "manual": "Dependabot alerts only read the files that the dependency graph parses; the detail names the lockfiles it skipped. Options: add a lockfile format the graph supports, submit the dependencies with the dependency submission API, or scan the lockfile in CI with a tool that reads it (Scorecard uses OSV).",
+      "scorecard": ["Vulnerabilities"],
+      "source": [
+        "https://docs.github.com/en/code-security/reference/supply-chain-security/dependency-graph-supported-package-ecosystems",
+        "https://docs.github.com/en/code-security/reference/supply-chain-security/supported-ecosystems-and-repositories",
+        "https://docs.github.com/en/rest/dependency-graph/dependency-submission",
+        "https://docs.github.com/public/fpt/schema.docs.graphql"
+      ]
+    },
+    {
       "id": "REPO-SECRET-SCANNING",
       "scope": "repo",
       "title": "Secret scanning is on",
@@ -684,9 +708,10 @@
                        "team": {"public": "free", "private": "paid:code_security"}},
       "read": {"paths": [".github/workflows/scorecard.yml", ".github/workflows/scorecards.yml", ".github/workflows/scorecard-analysis.yml"]},
       "fix": {"kind": "pr_file", "path": ".github/workflows/scorecard.yml", "template": "scorecard.yml",
-              "message": "Add the OpenSSF Scorecard workflow"},
+              "message": "Add the OpenSSF Scorecard workflow", "refresh_pins": true},
       "source": [
         "https://github.com/ossf/scorecard-action",
+        "https://github.com/ossf/scorecard-action/blob/v2.5.0/README.md",
         "https://github.com/ossf/scorecard/blob/main/.github/workflows/scorecard-analysis.yml"
       ]
     },

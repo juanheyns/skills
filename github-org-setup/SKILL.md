@@ -76,7 +76,10 @@ Ask in one round (use your question tool if you have one). Recommended defaults 
 - Can anyone bypass the default-branch ruleset? [for a new ruleset: nobody, `bypass_actors=[]`, which Scorecard
   needs for its top tier; org owners can still edit the ruleset in an emergency. For an existing ruleset: keep its
   bypass actors, and ask about each one that `apply` lists in a `[warn]` line.]
-- The security contact for `SECURITY.md` (an email address or URL). [no default]
+- The security contact for `SECURITY.md`: an email address, a URL, or `advisories` (GitHub private vulnerability
+  reporting only). [no default] The file always links GitHub's reporting docs, so Scorecard finds a link. Use
+  `advisories` only if every repo that inherits the file is public: private repos have no private reporting, and
+  the dry run warns about them.
 - Budgets: for each metered product without a budget, the amount in whole USD and who gets alerts. [ask]
 
 ### 3. Read the current costs
@@ -109,7 +112,9 @@ also works for private repos), else api.scorecard.dev:
 python3 scripts/ghsetup.py scorecard <org>/<repo>
 ```
 
-The last column shows which baseline checks raise each Scorecard check. Scorecard checks with no baseline check
+The last column shows which baseline checks raise each Scorecard check. If `REPO-DEPENDENCY-COVERAGE` fails, the
+dependency graph skipped a lockfile (for example `bun.lock`), so Dependabot alerts miss its vulnerabilities while
+Scorecard (OSV) still counts them; the detail names the files and both counts. Scorecard checks with no baseline check
 (Maintained, Contributors, Fuzzing, Signed-Releases, Binary-Artifacts, CII-Best-Practices, Dangerous-Workflow) are
 code or process work: report them, do not try to fix them with settings.
 
@@ -170,7 +175,9 @@ How fixes behave:
   | `ORG-IMMUTABLE-RELEASES` | a workflow uploads assets to a published release (`gh release upload`, a workflow on the `release` event that uploads, `actions/upload-release-asset`) |
 - **Merge steps** (Actions permissions) read the current value and change only the baseline's fields.
 - **PR fixes** (`SECURITY.md`, `dependabot.yml`, `scorecard.yml`) open a PR. `ORG-SECURITY-MD` creates the public
-  `.github` repo if it does not exist. Edit `dependabot.yml` in the PR to add the repo's package ecosystems.
+  `.github` repo if it does not exist. Edit `dependabot.yml` in the PR to add the repo's package ecosystems. The
+  Scorecard workflow's action SHAs are refreshed to the latest release of the same major version when the PR is
+  planned (an `[info] pin refreshed` line shows each change).
 - **Workflow fixes** are local: clone the repo, then
 
   ```sh
@@ -182,7 +189,9 @@ How fixes behave:
 
 ### 7. Verify and report
 
-`apply --execute` re-runs the checks for what it changed and prints `[verify]` lines. Run `audit` and `report` again
+`apply --execute` re-runs the checks for what it changed and prints `[verify]` lines. A check that still fails is
+read again after `--verify-delay` seconds (default 3, two more times), because GitHub can return the old value just
+after a write. A PR fix shows `pending-pr <url>` until the PR merges; that is not a failure. Run `audit` and `report` again
 at the end. Tell the user, in this order: what changed, what failed and why, what is still open (paid items they
 declined, destructive items they postponed, manual items), and what a new repo gets by default:
 

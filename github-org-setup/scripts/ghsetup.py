@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -558,6 +559,77 @@ def kind_list_match(gh, check, v, cache):
     return (PASS if ok else FAIL), current, "" if ok else exp.get("fail_note", "")
 
 
+MANIFESTS_QUERY = """query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    dependencyGraphManifests(first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { filename parseable }
+    }
+  }
+}"""
+
+
+def graph_manifests(gh, owner, repo):
+    """The files that the dependency graph parsed (GraphQL `dependencyGraphManifests`)."""
+    files, after = [], None
+    while True:
+        data = gh.api("POST", "/graphql", {"query": MANIFESTS_QUERY,
+                                           "variables": {"owner": owner, "name": repo, "after": after}})
+        page = pointer(data, "data.repository.dependencyGraphManifests") or {}
+        files += [n["filename"] for n in page.get("nodes") or [] if n.get("parseable", True)]
+        if not pointer(page, "pageInfo.hasNextPage"):
+            return files
+        after = pointer(page, "pageInfo.endCursor")
+
+
+def scorecard_vulnerabilities(repo):
+    """Open vulnerabilities that Scorecard (OSV) reports for a public repo, or None if there is no result."""
+    try:
+        with urllib.request.urlopen(f"https://api.scorecard.dev/projects/github.com/{repo}", timeout=20) as resp:
+            data = json.load(resp)
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+    check = next((c for c in data.get("checks", []) if c.get("name") == "Vulnerabilities"), None)
+    m = re.match(r"(\d+) existing vulnerabilit", (check or {}).get("reason") or "")
+    return {"count": int(m.group(1)), "date": data.get("date")} if m else None
+
+
+def kind_dependency_coverage(gh, check, v, cache):
+    """Lockfiles in the repo that the dependency graph did not parse get no Dependabot alerts.
+
+    Compares the lockfiles in the git tree with the manifests that the dependency graph reports, so it does not
+    depend on a list of supported ecosystems. For public repos it also compares Dependabot's open alerts with the
+    vulnerabilities that Scorecard (OSV) found.
+    """
+    owner, repo = v["owner"], v["repo"]
+    names = {n.lower() for n in check["read"]["lockfiles"]}
+    tree = gh.get(f"/repos/{owner}/{repo}/git/trees/{v['default_branch']}?recursive=1") or {}
+    lockfiles = sorted(t["path"] for t in tree.get("tree", [])
+                       if t.get("type") == "blob" and t["path"].rsplit("/", 1)[-1].lower() in names)
+    parsed = set(graph_manifests(gh, owner, repo))
+    uncovered = [p for p in lockfiles if p not in parsed]
+    notes, gap = [], bool(uncovered)
+    if uncovered:
+        notes.append("not in the dependency graph (no Dependabot alerts): " + ", ".join(uncovered))
+    if tree.get("truncated"):
+        notes.append("the git tree was truncated; some lockfiles may be missing from this check")
+    alerts = None
+    if v.get("visibility") == "public":
+        osv = scorecard_vulnerabilities(f"{owner}/{repo}")
+        if osv is not None:
+            try:
+                alerts = len(gh.get(f"/repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100",
+                                    paginate=True) or [])
+            except ApiError:
+                alerts = None
+            if alerts is not None and osv["count"] > alerts:
+                gap = True
+                notes.append(f"Scorecard (OSV) found {osv['count']} vulnerabilities on {osv['date'][:10]}, "
+                             f"Dependabot has {alerts} open alert(s)")
+    current = {"lockfiles": lockfiles, "uncovered": uncovered, "dependabot_open_alerts": alerts}
+    return (FAIL if gap else PASS), current, "; ".join(notes)
+
+
 def kind_manual(gh, check, v, cache):
     return MANUAL, None, check.get("manual", "")
 
@@ -569,6 +641,7 @@ KINDS = {
     "branch_rules": kind_branch_rules,
     "workflows": kind_workflows,
     "list_match": kind_list_match,
+    "dependency_coverage": kind_dependency_coverage,
     "manual": kind_manual,
 }
 
@@ -877,14 +950,91 @@ def plan_fix(check, r, findings, overrides=None, gh=None):
         return [{"method": "POST", "path": fill(fix["path"], v), "body": baseline, "merge": False,
                  "notes": [("info", "no ruleset applies to the default branch yet: creates a new one")]}]
     if kind == "pr_file":
+        notes = []
+        for name, fn in fix.get("derive", {}).items():
+            v[name], extra = DERIVE[fn](v, findings)
+            notes += extra
         with open(os.path.join(TEMPLATES_DIR, fix["template"])) as f:
             content = fill(f.read(), v)
+        if fix.get("refresh_pins") and gh:
+            content, extra = refresh_pins(content, gh)
+            notes += extra
         target_repo = fix.get("repo") or repo
-        return [{"method": "PR_FILE", "path": f"/repos/{owner}/{target_repo}", "merge": False,
+        return [{"method": "PR_FILE", "path": f"/repos/{owner}/{target_repo}", "merge": False, "notes": notes,
                  "body": {"path": fix["path"], "content": content,
                           "branch": fix.get("branch", "baseline/" + check["id"].lower()),
                           "message": fix.get("message", check["title"]), "create_repo": fix.get("create_repo")}}]
     raise ValueError(f"no automatic fix for kind {kind}")
+
+
+PRIVATE_REPORTING_DOCS = "https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately"
+
+
+def derive_security_contact(v, findings):
+    """The fallback line of SECURITY.md. `advisories` means: GitHub private vulnerability reporting only."""
+    contact = str(v.get("security_contact") or "").strip()
+    notes = []
+    if contact == "advisories":
+        line = ""
+        private = sorted({r["target"] for r in findings.get("results", [])
+                          if r.get("scope") == "repo" and r.get("visibility") not in (None, "public")})
+        if private:
+            notes.append(("warn", "security_contact=advisories, but private repos inherit this file and have no "
+                                  "private vulnerability reporting: " + ", ".join(private[:5]) +
+                                  (", ..." if len(private) > 5 else "") + ". Give an email or URL too"))
+    elif re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", contact):
+        line = f"If that is not available, send an email to <{contact}>."
+    elif re.match(r"https?://\S+$", contact):
+        line = f"If that is not available, use <{contact}>."
+    else:
+        raise MissingParams("security_contact must be an email address, a URL, or `advisories` "
+                            f"(GitHub private vulnerability reporting only); got {contact!r}")
+    return line, notes
+
+
+DERIVE = {"security_contact": derive_security_contact}
+
+
+PIN_RE = re.compile(r"^(\s*-?\s*uses:\s*)([\w.-]+)/([\w.-]+)((?:/[^@\s]+)?)@([0-9a-f]{40})\s*#\s*v(\d+)[\w.-]*\s*$")
+SEMVER_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+
+
+def latest_tag(gh, owner, repo, major):
+    """The highest vMAJOR.x.y tag of a repo, as (tag, sha). Stays on the same major version."""
+    best = None
+    for t in gh.get(f"/repos/{owner}/{repo}/tags?per_page=100", paginate=True) or []:
+        m = SEMVER_RE.match(t.get("name", ""))
+        if m and int(m.group(1)) == major:
+            key = tuple(int(x) for x in m.groups())
+            if best is None or key > best[0]:
+                best = (key, t["name"], t["commit"]["sha"])
+    return (best[1], best[2]) if best else None
+
+
+def refresh_pins(text, gh):
+    """Update `uses: owner/repo@<sha> # vX.Y.Z` lines in a template to the latest release of the same major."""
+    out, notes, cache = [], [], {}
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        m = PIN_RE.match(body)
+        if not m:
+            out.append(line)
+            continue
+        prefix, owner, repo, sub, sha, major = m.groups()
+        key = (owner, repo, int(major))
+        if key not in cache:
+            try:
+                cache[key] = latest_tag(gh, owner, repo, int(major))
+            except ApiError as e:
+                cache[key] = None
+                notes.append(("warn", f"could not refresh {owner}/{repo}: {e}; kept the template pin"))
+        hit = cache[key]
+        if hit and hit[1] != sha:
+            notes.append(("info", f"pin refreshed: {owner}/{repo}{sub} -> {hit[0]} ({hit[1][:12]})"))
+            out.append(f"{prefix}{owner}/{repo}{sub}@{hit[1]} # {hit[0]}" + line[len(body):])
+        else:
+            out.append(line)
+    return "".join(out), notes
 
 
 RULESET_READONLY = ("id", "source", "source_type", "node_id", "_links", "created_at", "updated_at",
@@ -1216,8 +1366,18 @@ def apply(gh, catalog, findings, patterns, all_free, accept_cost, execute, out=N
     return log
 
 
-def verify(gh, catalog, findings, keys):
-    """Re-run the checks for the given finding keys after apply."""
+PENDING_PR = "pending-pr"
+
+
+def verify(gh, catalog, findings, keys, pr_urls=None, retries=2, delay=3.0, sleep=None):
+    """Re-run the checks for the given finding keys after apply.
+
+    GitHub can return the old value for a short time after a write (seen with delete_branch_on_merge), so a
+    failed check is read again up to `retries` times, `delay` seconds apart. A fix that opened a PR stays open
+    until the PR merges: it is reported as `pending-pr <url>`, not as a failure.
+    """
+    sleep = sleep or time.sleep
+    pr_urls = pr_urls or {}
     by_id = {c["id"]: c for c in catalog["checks"]}
     out = []
     for r in findings["results"]:
@@ -1227,7 +1387,18 @@ def verify(gh, catalog, findings, keys):
         v = {"org": findings["org"], "owner": owner, "repo": repo, "target": r["target"], "plan": findings["plan"],
              "default_branch": r.get("default_branch") or "main", "visibility": r.get("visibility")}
         vis = None if r["scope"] == "org" else ("public" if r.get("visibility") == "public" else "private")
-        out.append(run_check(gh, by_id[r["id"]], v, findings["plan"], vis, {}))
+        if r["key"] in pr_urls:
+            res = run_check(gh, by_id[r["id"]], v, findings["plan"], vis, {})
+            if res["status"] != PASS:
+                res = dict(res, status=PENDING_PR, detail=f"{pr_urls[r['key']]} (passes after the PR merges)")
+            out.append(res)
+            continue
+        for attempt in range(retries + 1):
+            res = run_check(gh, by_id[r["id"]], v, findings["plan"], vis, {})
+            if res["status"] != FAIL or attempt == retries:
+                break
+            sleep(delay)
+        out.append(res)
     return out
 
 
@@ -1448,6 +1619,8 @@ def main(argv=None, gh=None):
                     help="template parameters, e.g. review_count=0 (values parsed as JSON when possible)")
     ap.add_argument("--override", nargs="*", default=[], metavar="KEY",
                     help="finding key or check ID globs whose blocking preconditions the user accepted")
+    ap.add_argument("--verify-delay", type=float, default=3.0,
+                    help="seconds between re-reads when a check still fails right after a change (default 3)")
     ap.add_argument("--log", help="write the apply log JSON here")
 
     sub.add_parser("catalog", help="markdown of all checks")
@@ -1536,7 +1709,8 @@ def main(argv=None, gh=None):
                         overrides=parse_sets(args.set), override_blocks=args.override)
             if args.execute and log:
                 keys = {e["key"] for e in log if e.get("ok")}
-                for res in verify(gh, catalog, findings, keys):
+                prs = {e["key"]: e["result"] for e in log if e.get("ok") and e.get("method") == "PR_FILE"}
+                for res in verify(gh, catalog, findings, keys, prs, delay=args.verify_delay):
                     print(f"[verify] {res['key']}: {res['status']} {res['detail']}".rstrip())
             if args.log:
                 with open(args.log, "w") as f:
