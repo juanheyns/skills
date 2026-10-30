@@ -30,8 +30,10 @@ and its sources. `references/checks.md` is the same catalog as a table. The rule
    If you cannot read the page, say so and give the link; do not guess. Pass `--accept-cost <product>` only after
    the user says yes to that product. The script refuses paid fixes without it. (S3)
 3. **Destructive changes are asked one by one.** A finding marked `destructive` can break workflows or remove
-   access. `--all-free` never selects them. Explain the text in the `destructive` field and check the precondition
-   it names (for example, run `pin` before you require SHA pinning). (S4)
+   access. `--all-free` never selects them. Explain the text in the `destructive` field. `apply` also runs
+   **preconditions** for these fixes and prints `[info]`, `[warn]` and `[block]` lines. Show every `[warn]` and
+   `[block]` line to the user. A `[block]` stops `--execute` for that finding (exit code 4): fix the cause, or, only
+   after the user accepts the named risk, re-run with `--override <key>`. (S4)
 4. **The user decides policy values.** Ask, do not assume: how many people can review a PR, the security contact,
    budget amounts and recipients, and which repositories are in scope. (S5)
 5. **Facts come from the docs, and they move.** The catalog was verified on the date in its `verified_on` field.
@@ -71,8 +73,9 @@ Ask in one round (use your question tool if you have one). Recommended defaults 
 - Which repositories are in scope? [all non-archived, non-fork repos]
 - How many people can review PRs? This sets `review_count` [1]. With one maintainer, use `review_count=0`; the
   Branch-Protection and Code-Review findings then stay open, and that is a known trade-off.
-- Can anyone bypass the default-branch ruleset? [nobody: `bypass_actors=[]`, which Scorecard needs for its top
-  tier. Org owners can still edit the ruleset in an emergency.]
+- Can anyone bypass the default-branch ruleset? [for a new ruleset: nobody, `bypass_actors=[]`, which Scorecard
+  needs for its top tier; org owners can still edit the ruleset in an emergency. For an existing ruleset: keep its
+  bypass actors, and ask about each one that `apply` lists in a `[warn]` line.]
 - The security contact for `SECURITY.md` (an email address or URL). [no default]
 - Budgets: for each metered product without a budget, the amount in whole USD and who gets alerts. [ask]
 
@@ -92,6 +95,9 @@ python3 scripts/ghsetup.py audit <org> --out /tmp/<org>-audit.json      # add --
 python3 scripts/ghsetup.py report /tmp/<org>-audit.json                  # --all also shows passes
 ```
 
+For `ORG-2FA`, the detail names the members and outside collaborators without 2FA (and with SMS only). Tell the user
+who loses access before they turn it on.
+
 Status values: `pass`, `fail`, `unavailable` (the plan does not have it for this repo), `skipped` (condition not
 met), `unknown` (no permission or the endpoint failed; read the detail), `manual` (UI only; the detail says what to
 do).
@@ -106,6 +112,16 @@ python3 scripts/ghsetup.py scorecard <org>/<repo>
 The last column shows which baseline checks raise each Scorecard check. Scorecard checks with no baseline check
 (Maintained, Contributors, Fuzzing, Signed-Releases, Binary-Artifacts, CII-Best-Practices, Dangerous-Workflow) are
 code or process work: report them, do not try to fix them with settings.
+
+Before you change Actions policies, list the actions in use (read only):
+
+```sh
+python3 scripts/ghsetup.py actions-in-use <org>
+```
+
+It reads the workflows of every repo through the API and follows local and remote composite actions and reusable
+workflows. It ends with the `--set patterns_allowed='[...]'` argument for `ORG-ACTIONS-ALLOWED`: every third-party
+action in use. Review it with the user; it allows everything that runs today, so remove what they do not trust.
 
 ### 5. Present the plan
 
@@ -132,13 +148,26 @@ python3 scripts/ghsetup.py apply /tmp/<org>-audit.json --select ORG-SECURITY-MD 
 python3 scripts/ghsetup.py apply /tmp/<org>-audit.json --select 'REPO-SECRET-SCANNING@<org>/<repo>' --accept-cost secret_protection
 ```
 
-After approval, run the same command with `--execute --log /tmp/<org>-apply.json`. Exit code 3 means a selected fix
-needs a `--set` value; 1 means an API call failed (read the `[error]` line).
+After approval, run the same command with `--execute --log /tmp/<org>-apply.json`. Exit codes: 3 means a selected fix
+needs a `--set` value; 4 means a precondition blocked a fix (read the `[block]` line); 1 means an API call failed
+(read the `[error]` line).
 
 How fixes behave:
 
-- **Rulesets:** on Free, one repo ruleset for each public repo. On Team, **one org ruleset** for the default branch
-  of all repos (new repos included); the script creates it only once.
+- **Rulesets:** if a ruleset already protects the default branch, the fix **updates it in place**: it adds missing
+  rules and raises values to the baseline, and it never lowers a value. It keeps the other rules
+  (required_status_checks, merge methods, required reviewers) and the bypass actors (pass `--set bypass_actors=...`
+  to change them). If an org ruleset is the one that applies, the change affects every repo that it targets.
+  If no ruleset applies, the fix creates one: on Free, a repo ruleset for each public repo; on Team, **one org
+  ruleset** for the default branch of all repos (new repos included), created only once.
+- **Preconditions** (`[block]` unless the user accepts):
+
+  | Fix | Blocks when |
+  | --- | --- |
+  | `REPO-BRANCH-PROTECTION` | fewer other accounts with write access than the required approvals (your own PRs could not merge); or write deploy keys and no DeployKey bypass |
+  | `ORG-ACTIONS-ALLOWED` | an action in use is not GitHub-owned, not the org's own, and not in `patterns_allowed` |
+  | `ORG-ACTIONS-SHA-PINNING` | a workflow uses an action by tag or branch (references inside third-party composite actions are only a warning) |
+  | `ORG-IMMUTABLE-RELEASES` | a workflow uploads assets to a published release (`gh release upload`, a workflow on the `release` event that uploads, `actions/upload-release-asset`) |
 - **Merge steps** (Actions permissions) read the current value and change only the baseline's fields.
 - **PR fixes** (`SECURITY.md`, `dependabot.yml`, `scorecard.yml`) open a PR. `ORG-SECURITY-MD` creates the public
   `.github` repo if it does not exist. Edit `dependabot.yml` in the PR to add the repo's package ecosystems.

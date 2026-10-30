@@ -38,6 +38,7 @@ This file records each decision and trade-off made while writing the skill. "I g
 
 | Choice | Why | Basis |
 | --- | --- | --- |
+| A failed precondition blocks `--execute`; `--override <key>` accepts the risk | Same idea as `--accept-cost`: the code stops a known break, the user decides. Dry runs exit 4 too, so the agent sees it before it asks. | J |
 | Rulesets, not classic branch protection | GitHub prefers rulesets (more flexible, conversion tools, org-level on Team). Scorecard reads rulesets with a non-admin token. The audit accepts classic protection too, so existing repos are not flagged just for using it. | docs; Scorecard action README |
 | Default `review_count=1`, no bypass, last-push approval on, stale reviews dismissed | Scorecard Branch-Protection tiers 1, 2 and 5. Code-owner review is off by default because it needs a CODEOWNERS file first. | Scorecard checks.md; J for the defaults |
 | Org ruleset covers `~ALL` repos with `protected: false` | Covers new repos automatically. `protected: true` would block repo renames; that is a separate policy. | REST docs; J |
@@ -63,8 +64,48 @@ This file records each decision and trade-off made while writing the skill. "I g
 | Artifact attestations, signed releases, fuzzing, CII badge | Need changes in the build or a human process; Scorecard reports them. |
 | Auto-creating `CODEOWNERS`, `LICENSE`, required status check names | Need owner decisions (teams, legal choice, CI check names). These are `manual`. |
 
+## Changes after the first test run (2026-10-30)
+
+The first run on `brnrhq` (Free plan) found five ways the fixes could break things. Each one is now a precondition
+in code (`PRECONDITIONS` in `scripts/ghsetup.py`), not only a sentence in SKILL.md.
+
+1. **Branch protection updated the wrong thing.** The fix created a second ruleset with no bypass. On
+   `homebrew-tap` that would have blocked the DeployKey push that `release.yml` uses. Now the fix reads
+   `rules/branches/{default}` to find the ruleset that applies, and updates it in place with `PUT`. It never lowers
+   a value, keeps the other rules (required_status_checks, merge methods) and the bypass actors, and lists
+   non-admin bypass actors as `[warn]` so the agent asks. If nothing applies, it creates one as before. If the
+   ruleset that applies is an org ruleset, the fix updates the org ruleset and warns that it covers other repos;
+   I guess that is better than adding a repo ruleset next to it.
+2. **No help for the Actions allow list.** `patterns_allowed` defaulted to `[]`, and the test session found the 11
+   owners, the subdirectory paths and the nested composite actions by hand. Now `actions-in-use <org>` builds the
+   list through the API, and the `actions_allowlist` precondition blocks while an action in use is not allowed.
+   Marketplace verification cannot be read through the API, so the check assumes an action is not verified; that
+   can block an action that would still run. I chose a false block over a broken workflow.
+3. **Required approvals could block all merges.** With `review_count=1`, a user can merge their own PR only if
+   another account with write access approves (`alexshellbot` had read access on two repos). The `reviewers`
+   precondition counts other accounts with write access (accounts of type `Bot` do not count) and blocks if there
+   are fewer than the required approvals. The `deploy_keys` precondition blocks a ruleset without a DeployKey bypass
+   when the repo has write deploy keys.
+4. **2FA did not say who is affected.** The `explain` field on `ORG-2FA` now lists members and outside
+   collaborators without 2FA, and with SMS only, in the finding detail.
+5. **Immutable releases had no precondition.** The `release_assets` precondition reads every workflow: it blocks
+   on uploads to a published release (`gh release upload` without a draft, a workflow on the `release` event that
+   uploads, `actions/upload-release-asset`) and warns on draft flows and on `softprops/action-gh-release` without
+   `draft: true`. `gh release create` with the files passes: gh uploads before it publishes. This is a line-based
+   heuristic, not a YAML parser; it can miss uploads done through scripts or other actions.
+
+**Scorecard's docs and code disagree on bot reviews.** `docs/checks.md` (v5.6.0, lines 221–223) says reviews by
+bots do not count as code review. The code counts any `APPROVED` review whose author is not the changeset author
+(`probes/codeApproved/impl.go`, `approved()`), with no bot test on the reviewer. It marks only *authors* as bots,
+and only GitHub Apps (`/apps/` resource path, `clients/githubrepo/graphql.go`). So an approval from a machine user
+(a normal account such as `alexshellbot`) raises Code-Review today, though the docs say it should not. The skill
+does not count a machine user as a real reviewer in its advice, and it does not suggest bot approvals to raise the
+score: the docs state the intent, and the code may change.
+
 ## Known limits
 
 - The Team plan path (`plan.name` value, org ruleset creation, paid enablement) is covered by unit tests with a fake
   GitHub, not by a live Team org. Run a dry run first on a real Team org.
-- No change was executed against a real org while writing the skill; every live call was a read.
+- The first version's fixes were executed on `brnrhq` (Free plan) by a separate test session on 2026-10-30. The
+  preconditions, the in-place ruleset update and `actions-in-use` were then tested with unit tests, live reads and
+  dry runs on `brnrhq`, not with `--execute`.

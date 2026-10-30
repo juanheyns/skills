@@ -1,5 +1,7 @@
 """Offline tests for scripts/ghsetup.py. Run: python3 -m unittest discover -s github-org-setup/tests"""
 
+import base64
+import copy
 import io
 import json
 import os
@@ -287,13 +289,13 @@ class TestEngineFeatures(unittest.TestCase):
 
     def test_by_plan_and_dedupe(self):
         free, _ = run_audit(self.routes("free"), catalog=self.CAT)
-        fake = FakeGitHub({("POST", "/repos/acme/api/rulesets"): (201, {}),
+        fake = FakeGitHub({**self.routes("free"), ("POST", "/repos/acme/api/rulesets"): (201, {}),
                            ("POST", "/repos/acme/secret/rulesets"): (201, {})})
         ghsetup.apply(ghsetup.Gh(fake), self.CAT, free, ["REPO-RULES"], False, set(), True, io.StringIO())
         self.assertEqual(sorted(p for _, p, _ in fake.writes), ["/repos/acme/api/rulesets", "/repos/acme/secret/rulesets"])
 
         team, _ = run_audit(self.routes("team"), catalog=self.CAT)
-        fake = FakeGitHub({("POST", "/orgs/acme/rulesets"): (201, {})})
+        fake = FakeGitHub({**self.routes("team"), ("POST", "/orgs/acme/rulesets"): (201, {})})
         log = ghsetup.apply(ghsetup.Gh(fake), self.CAT, team, ["REPO-RULES"], False, set(), True, io.StringIO())
         self.assertEqual([p for _, p, _ in fake.writes], ["/orgs/acme/rulesets"], "one org ruleset for all repos")
         body = fake.writes[0][2]
@@ -303,6 +305,276 @@ class TestEngineFeatures(unittest.TestCase):
     def test_parse_sets(self):
         self.assertEqual(ghsetup.parse_sets(["a=1", "b=true", 'c=["x"]', "d=team-x"]),
                          {"a": 1, "b": True, "c": ["x"], "d": "team-x"})
+
+
+def b64(text):
+    return {"content": base64.b64encode(text.encode()).decode(), "sha": "x"}
+
+
+RULESET_PARAMS = {"review_count": 1, "require_code_owner_review": False, "require_last_push_approval": True,
+                  "bypass_actors": []}
+BRANCH_CHECK = {"id": "REPO-BP", "scope": "repo", "title": "t", "kind": "branch_rules",
+                "availability": {"free": "free", "team": "free"},
+                "expect": {"rules": [{"type": "pull_request", "params": [
+                    {"param": "required_approving_review_count", "op": "gte", "value": 1}]}]},
+                "fix": {"kind": "ruleset", "params": RULESET_PARAMS, "preconditions": ["reviewers", "deploy_keys"],
+                        "by_plan": {"free": {"template": "ruleset-repo-default-branch.json",
+                                             "path": "/repos/{owner}/{repo}/rulesets"},
+                                    "team": {"template": "ruleset-org-default-branch.json",
+                                             "path": "/orgs/{org}/rulesets"}}}}
+BP_CAT = {"verified_on": "x", "plans": ["free", "team"], "products": {}, "checks": [BRANCH_CHECK]}
+
+# The homebrew-tap ruleset from the test session: 0 approvals, status checks, a DeployKey bypass.
+TAP_RULESET = {
+    "id": 24881204, "name": "main", "target": "branch", "source_type": "Repository", "source": "acme/api",
+    "enforcement": "active", "node_id": "RRS_x", "created_at": "c", "updated_at": "u",
+    "conditions": {"ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]}},
+    "bypass_actors": [{"actor_id": None, "actor_type": "DeployKey", "bypass_mode": "always"}],
+    "rules": [{"type": "deletion"}, {"type": "non_fast_forward"},
+              {"type": "pull_request", "parameters": {
+                  "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": False,
+                  "require_code_owner_review": False, "require_last_push_approval": False,
+                  "required_review_thread_resolution": True, "allowed_merge_methods": ["merge", "squash", "rebase"]}},
+              {"type": "required_status_checks", "parameters": {
+                  "strict_required_status_checks_policy": False,
+                  "required_status_checks": [{"context": "formulae (ubuntu-latest)", "integration_id": 15368}]}}]}
+APPLIED = [dict(r, ruleset_source_type="Repository", ruleset_id=24881204) for r in TAP_RULESET["rules"]]
+
+
+class TestRulesetInPlace(unittest.TestCase):
+    def routes(self, writers=("me", "alice"), keys=(), applied=APPLIED, ruleset=TAP_RULESET):
+        r = base_routes({
+            ("GET", "/orgs/acme/repos?type=all&per_page=100"): (200, REPOS[:1]),
+            ("GET", "/repos/acme/api/rules/branches/main"): (200, list(applied)),
+            ("GET", "/repos/acme/api/rulesets/24881204"): (200, ruleset),
+            ("GET", "/orgs/acme/rulesets/99"): (200, dict(ruleset, id=99, source_type="Organization")),
+            ("GET", "/repos/acme/api/collaborators?permission=push&affiliation=all&per_page=100"): (
+                200, [{"login": w, "type": "User"} for w in writers]),
+            ("GET", "/repos/acme/api/keys?per_page=100"): (200, list(keys)),
+            ("PUT", "/repos/acme/api/rulesets/24881204"): (200, {}),
+            ("PUT", "/orgs/acme/rulesets/99"): (200, {}),
+            ("POST", "/repos/acme/api/rulesets"): (201, {}),
+        })
+        return r
+
+    def run_apply(self, routes, execute=True, **kw):
+        findings, _ = run_audit(routes, catalog=BP_CAT)
+        fake = FakeGitHub(routes)
+        out = io.StringIO()
+        log = ghsetup.apply(ghsetup.Gh(fake), BP_CAT, findings, ["REPO-BP"], False, set(), execute, out, **kw)
+        return fake, out.getvalue(), log
+
+    def test_updates_existing_ruleset_and_keeps_checks_and_bypass(self):
+        fake, out, _ = self.run_apply(self.routes())
+        self.assertEqual([(m, p) for m, p, _ in fake.writes], [("PUT", "/repos/acme/api/rulesets/24881204")])
+        body = fake.writes[0][2]
+        for k in ("id", "node_id", "source", "source_type", "created_at", "updated_at"):
+            self.assertNotIn(k, body)
+        rules = {r["type"]: r for r in body["rules"]}
+        pr = rules["pull_request"]["parameters"]
+        self.assertEqual(pr["required_approving_review_count"], 1)
+        self.assertTrue(pr["dismiss_stale_reviews_on_push"] and pr["require_last_push_approval"])
+        self.assertEqual(pr["allowed_merge_methods"], ["merge", "squash", "rebase"], "other params kept")
+        self.assertIn("required_status_checks", rules, "status checks kept")
+        self.assertEqual(body["bypass_actors"], TAP_RULESET["bypass_actors"], "bypass kept")
+        self.assertIn("[warn]", out)
+        self.assertIn("DeployKey(always)", out)
+        self.assertNotIn("parameters", rules["deletion"], "no empty parameters added to rules without them")
+
+    def test_no_put_when_ruleset_already_meets_baseline(self):
+        ok = copy.deepcopy(TAP_RULESET)
+        ok["rules"][2]["parameters"].update(required_approving_review_count=1, dismiss_stale_reviews_on_push=True,
+                                            require_last_push_approval=True)
+        routes = self.routes(ruleset=ok)
+        findings, _ = run_audit(self.routes(), catalog=BP_CAT)  # audit sees the weak ruleset: fail
+        fake = FakeGitHub(routes)                               # by apply time it was fixed
+        out = io.StringIO()
+        ghsetup.apply(ghsetup.Gh(fake), BP_CAT, findings, ["REPO-BP"], False, set(), True, out)
+        self.assertEqual(fake.writes, [])
+        self.assertIn("[no change]", out.getvalue())
+
+    def test_never_weakens(self):
+        strong = copy.deepcopy(TAP_RULESET)
+        strong["rules"][2]["parameters"]["required_approving_review_count"] = 2
+        body, _ = ghsetup.upgrade_ruleset(strong, {"rules": [{"type": "pull_request", "parameters": {
+            "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": False}}]})
+        pr = next(r for r in body["rules"] if r["type"] == "pull_request")["parameters"]
+        self.assertEqual(pr["required_approving_review_count"], 2)
+
+    def test_org_ruleset_is_updated_at_org_level(self):
+        applied = [dict(r, ruleset_source_type="Organization", ruleset_id=99) for r in TAP_RULESET["rules"]]
+        fake, out, _ = self.run_apply(self.routes(applied=applied))
+        self.assertEqual([p for _, p, _ in fake.writes], ["/orgs/acme/rulesets/99"])
+        self.assertIn("applies to every repo it targets", out)
+
+    def test_blocks_when_nobody_else_can_approve(self):
+        fake, out, log = self.run_apply(self.routes(writers=("me",)))
+        self.assertEqual(fake.writes, [])
+        self.assertIn("[blocked]", out)
+        self.assertIn("only 0 other account(s)", out)
+        fake, out, _ = self.run_apply(self.routes(writers=("me",)), override_blocks=["REPO-BP@acme/api"])
+        self.assertEqual(len(fake.writes), 1, "--override lets the user accept the risk")
+        self.assertIn("block, overridden", out)
+
+    def test_bots_do_not_count_as_reviewers(self):
+        routes = self.routes()
+        routes[("GET", "/repos/acme/api/collaborators?permission=push&affiliation=all&per_page=100")] = (
+            200, [{"login": "me", "type": "User"}, {"login": "dependabot[bot]", "type": "Bot"}])
+        fake, out, _ = self.run_apply(routes)
+        self.assertEqual(fake.writes, [])
+
+    def test_new_ruleset_blocked_by_write_deploy_key(self):
+        routes = self.routes(applied=[], keys=[{"title": "release workflow", "read_only": False},
+                                               {"title": "ro", "read_only": True}])
+        fake, out, _ = self.run_apply(routes)
+        self.assertEqual(fake.writes, [])
+        self.assertIn("deploy keys with write access: release workflow", out)
+        self.assertNotIn(", ro", out)
+
+    def test_new_ruleset_without_keys_is_created(self):
+        fake, out, _ = self.run_apply(self.routes(applied=[]))
+        self.assertEqual([(m, p) for m, p, _ in fake.writes], [("POST", "/repos/acme/api/rulesets")])
+
+    def test_dry_run_exit_code_for_blocks(self):
+        routes = self.routes(writers=("me",))
+        fake = FakeGitHub(routes)
+        with open(os.devnull, "w") as devnull:
+            findings, _ = run_audit(routes, catalog=BP_CAT)
+            path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "ghsetup-test-findings.json")
+            with open(path, "w") as f:
+                json.dump(findings, f)
+            catalog = os.path.join(os.environ.get("TMPDIR", "/tmp"), "ghsetup-test-catalog.json")
+            with open(catalog, "w") as f:
+                json.dump(BP_CAT, f)
+            old = sys.stdout
+            sys.stdout = devnull
+            try:
+                code = ghsetup.main(["--catalog", catalog, "apply", path, "--select", "REPO-BP"], gh=ghsetup.Gh(fake))
+            finally:
+                sys.stdout = old
+        self.assertEqual(code, 4)
+
+
+class TestActionsScan(unittest.TestCase):
+    CI = ("permissions:\n  contents: read\njobs:\n  a:\n    steps:\n"
+          "      - uses: actions/checkout@" + "a" * 40 + "\n"
+          "      - uses: dtolnay/rust-toolchain@stable\n"
+          "      - uses: ./.github/actions/setup\n"
+          "      - uses: google/clusterfuzzlite/actions/build_fuzzers@" + "b" * 40 + "\n"
+          "  b:\n    uses: other/shared/.github/workflows/lint.yml@v1\n")
+    LOCAL = "runs:\n  using: composite\n  steps:\n    - uses: Swatinem/rust-cache@v2\n"
+    REMOTE = "runs:\n  using: composite\n  steps:\n    - uses: nested/inner@v3\n"
+    REUSABLE = "jobs:\n  l:\n    steps:\n      - uses: raven-actions/actionlint@v2\n"
+
+    def routes(self):
+        return base_routes({
+            ("GET", "/orgs/acme/repos?type=all&per_page=100"): (200, REPOS[:1]),
+            ("GET", "/repos/acme/api/contents/.github/workflows"): (200, [{"name": "ci.yml",
+                                                                           "path": ".github/workflows/ci.yml"}]),
+            ("GET", "/repos/acme/api/contents/.github/workflows/ci.yml"): (200, b64(self.CI)),
+            ("GET", "/repos/acme/api/contents/.github/actions/setup/action.yml"): (200, b64(self.LOCAL)),
+            ("GET", "/repos/google/clusterfuzzlite/contents/actions/build_fuzzers/action.yml?ref=" + "b" * 40): (
+                200, b64(self.REMOTE)),
+            ("GET", "/repos/other/shared/contents/.github/workflows/lint.yml?ref=v1"): (200, b64(self.REUSABLE)),
+        })
+
+    def summary(self):
+        gh = ghsetup.Gh(FakeGitHub(self.routes()))
+        uses = list(ghsetup.WorkflowScan(gh, "acme").uses(["api"]))
+        return uses, ghsetup.summarize_uses(uses, "acme")
+
+    def test_follows_local_remote_and_reusable(self):
+        uses, summary = self.summary()
+        actions = {a["action"]: a for a in summary}
+        for name in ("dtolnay/rust-toolchain", "Swatinem/rust-cache", "google/clusterfuzzlite/actions/build_fuzzers",
+                     "nested/inner", "other/shared/.github/workflows/lint.yml", "raven-actions/actionlint"):
+            self.assertIn(name, actions)
+        self.assertTrue(actions["Swatinem/rust-cache"]["nested"])
+        self.assertTrue(actions["nested/inner"]["nested"])
+        self.assertEqual(actions["other/shared/.github/workflows/lint.yml"]["kind"], "reusable")
+        self.assertEqual(actions["actions/checkout"]["class"], "github")
+        self.assertIn("google/clusterfuzzlite/actions/build_fuzzers@*", ghsetup.suggested_patterns(summary))
+        self.assertNotIn("actions/checkout@*", ghsetup.suggested_patterns(summary))
+
+    def test_blocked_and_allowed(self):
+        _, summary = self.summary()
+        pats = ghsetup.suggested_patterns(summary)
+        self.assertEqual(ghsetup.blocked_actions(summary, pats), [])
+        blocked = {a["action"] for a in ghsetup.blocked_actions(summary, [p for p in pats if "rust-cache" not in p])}
+        self.assertEqual(blocked, {"Swatinem/rust-cache"})
+        self.assertTrue(ghsetup.allowed_by_patterns("Swatinem/rust-cache", "v2", ["swatinem/*"]))
+        self.assertFalse(ghsetup.allowed_by_patterns("Swatinem/rust-cache", "v2", ["!Swatinem/rust-cache@*"]))
+
+    def test_allowlist_and_pinning_preconditions(self):
+        cat = {"verified_on": "x", "plans": ["free", "team"], "products": {}, "checks": [
+            {"id": "ORG-AA", "scope": "org", "title": "t", "kind": "field", "availability": {"free": "free"},
+             "read": {"path": "/orgs/{org}", "pointer": "default_repository_permission"},
+             "expect": {"op": "eq", "value": "read"},
+             "fix": {"kind": "api", "preconditions": ["actions_allowlist", "sha_pinning"],
+                     "params": {"patterns_allowed": []},
+                     "steps": [{"method": "PUT", "path": "/orgs/{org}/actions/permissions/selected-actions",
+                                "body": {"github_owned_allowed": True, "verified_allowed": True,
+                                         "patterns_allowed": "{patterns_allowed}"}}]}}]}
+        routes = self.routes()
+        routes[("PUT", "/orgs/acme/actions/permissions/selected-actions")] = (204, None)
+        findings, _ = run_audit(routes, catalog=cat)
+        fake = FakeGitHub(routes)
+        out = io.StringIO()
+        ghsetup.apply(ghsetup.Gh(fake), cat, findings, ["ORG-AA"], False, set(), True, out)
+        text = out.getvalue()
+        self.assertEqual(fake.writes, [])
+        self.assertIn("action(s) in use are not allowed", text)
+        self.assertIn("Marketplace-verified", text)
+        self.assertIn("unpinned action reference(s) in workflows", text)
+        self.assertIn("dtolnay/rust-toolchain@stable", text)
+        self.assertIn("inside composite actions", text, "nested tags are a warning, not a block")
+
+
+class TestReleaseLint(unittest.TestCase):
+    def levels(self, text):
+        return [level for level, _ in ghsetup.lint_release_text(text)]
+
+    def test_release_event_upload_blocks(self):
+        wf = "on:\n  release:\n    types: [published]\njobs:\n  a:\n    steps:\n      - run: gh release upload v1 x\n"
+        self.assertEqual(self.levels(wf), ["block"])
+
+    def test_upload_after_publish_blocks_and_draft_warns(self):
+        self.assertEqual(self.levels("on: push\nsteps:\n  - run: gh release create v1\n  - run: gh release upload v1 a\n"),
+                         ["block"])
+        self.assertEqual(self.levels("steps:\n  - run: gh release create v1 --draft\n  - run: gh release upload v1 a\n"
+                                     "  - run: gh release edit v1 --draft=false\n"), ["warn"])
+
+    def test_job_named_release_is_not_a_trigger(self):
+        wf = ("on:\n  push:\n    tags: ['v*']\njobs:\n  release:\n    steps:\n"
+              "      - run: gh release create v1 --draft\n      - run: gh release upload v1 a\n")
+        self.assertEqual(self.levels(wf), ["warn"], "a job named release must not read as the release event")
+
+    def test_create_with_files_is_safe(self):
+        self.assertEqual(self.levels("on: push\nsteps:\n  - run: gh release create v1 dist/*\n"), [])
+
+    def test_upload_actions(self):
+        self.assertEqual(self.levels("on: push\nsteps:\n  - uses: softprops/action-gh-release@v2\n"), ["warn"])
+        self.assertEqual(self.levels("on: push\nsteps:\n  - uses: softprops/action-gh-release@v2\n"
+                                     "    with:\n      draft: true\n"), [])
+        self.assertEqual(self.levels("on: push\nsteps:\n  - uses: actions/upload-release-asset@v1\n"), ["block"])
+
+
+class TestExplain(unittest.TestCase):
+    def test_2fa_names_people(self):
+        cat = {"verified_on": "x", "plans": ["free", "team"], "products": {}, "checks": [
+            {"id": "ORG-2FA", "scope": "org", "title": "t", "kind": "field", "availability": {"free": "free"},
+             "read": {"path": "/orgs/{org}", "pointer": "two_factor_requirement_enabled"},
+             "expect": {"op": "eq", "value": True}, "fix": {"kind": "manual"}, "manual": "UI",
+             "explain": [{"label": "members without 2FA", "path": "/orgs/{org}/members?filter=2fa_disabled",
+                          "pluck": "login"},
+                         {"label": "outside collaborators without 2FA (removed)",
+                          "path": "/orgs/{org}/outside_collaborators?filter=2fa_disabled", "pluck": "login"}]}]}
+        routes = base_routes({("GET", "/orgs/acme/members?filter=2fa_disabled"): (200, [{"login": "bob"}]),
+                              ("GET", "/orgs/acme/outside_collaborators?filter=2fa_disabled"): (200, [])})
+        findings, _ = run_audit(routes, catalog=cat)
+        detail = by_key(findings)["ORG-2FA@acme"]["detail"]
+        self.assertIn("members without 2FA: bob", detail)
+        self.assertIn("outside collaborators without 2FA (removed): none", detail)
 
 
 class TestWorkflows(unittest.TestCase):
@@ -358,6 +630,10 @@ class TestCatalogFile(unittest.TestCase):
                 for variant in variants:
                     if fix.get("kind") in ("ruleset", "pr_file"):
                         self.assertTrue(os.path.exists(os.path.join(ghsetup.TEMPLATES_DIR, variant["template"])))
+                for name in fix.get("preconditions", []):
+                    self.assertIn(name, ghsetup.PRECONDITIONS)
+                for spec in c.get("explain", []):
+                    self.assertTrue(spec["label"] and spec["path"] and spec["pluck"])
                 if c.get("kind") == "manual" or fix.get("kind") == "manual":
                     self.assertTrue(c.get("manual"), "manual items must say what the human does")
 

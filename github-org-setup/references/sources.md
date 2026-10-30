@@ -36,6 +36,16 @@ read-only API response (org `brnrhq`, Free plan, 2026-10-30); **J** my judgment 
   and `immutable-releases` answer `{"enabled": ...}`; `code-scanning/default-setup` returns `state`.
 - A repo ruleset made in the UI uses `{"actor_type": "RepositoryRole", "actor_id": 5}` for the admin role. The
   docs do not list role ids, so the templates use `OrganizationAdmin` (documented) when a bypass is needed.
+- `GET /repos/{o}/{r}/rules/branches/{branch}` returns `ruleset_source_type` and `ruleset_id` for each active rule,
+  so the fix can find the ruleset to update. A `PUT /repos/{o}/{r}/rulesets/{id}` with the GET body (read-only
+  fields removed) and raised `pull_request` parameters updated `brnrhq/homebrew-tap` in place in the test session
+  (ruleset `24881204`, status checks and DeployKey bypass kept).
+- `GET /orgs/{org}/members?filter=2fa_disabled` and `?filter=2fa_insecure`, and the same filters on
+  `/orgs/{org}/outside_collaborators`, return the affected logins (owner token).
+- `GET /repos/{o}/{r}/collaborators?permission=push&affiliation=all` lists accounts with write access (with
+  `type`); `GET /repos/{o}/{r}/keys` returns deploy keys with `read_only`.
+- `actions-in-use brnrhq` gave the same 12 third-party patterns that the test session found by hand, including
+  subdirectory actions (`google/clusterfuzzlite/actions/build_fuzzers`) and actions nested in composite actions.
 - Scorecard v5.6.0 reads `SECURITY.md` from the org `.github` repo if the repo has none
   (`checks/raw/security_policy.go`, lines 61–79), and counts `.github/dependabot.yml` and Renovate files
   (`checks/raw/dependency_update_tool.go`). Pinned action SHAs from the template were resolved live with `pin`.
@@ -50,6 +60,9 @@ read-only API response (org `brnrhq`, Free plan, 2026-10-30); **J** my judgment 
 | `workflows` (required workflows) rule on Team | Not used |
 | Free-plan availability of org roles, custom properties, immutable releases | Not used, or read at run time (a 403/404 gives `unknown`) |
 | REST API for 2FA, OAuth app restrictions, PAT policy, member privileges | Treated as UI only (`manual`) |
+| How GitHub matches `patterns_allowed` (case, `owner/*`, subpaths) | `allowed_by_patterns` approximates it with case-insensitive globs; the suggested list uses exact `owner/repo[/path]@*` entries |
+| Whether the Actions allow policy and SHA pinning apply inside third-party composite actions | The scan follows them; for SHA pinning, nested tags are a `warn`, not a `block` |
+| Marketplace "verified creator" status | No API. With `verified_allowed=true` the blocked list can include actions that would still run; the skill says so |
 | Whether Scorecard counts the repo/org "read-only GITHUB_TOKEN default" | It does not (Scorecard: "no API available"); the skill checks both the setting and the workflow files |
 
 ## Research inputs

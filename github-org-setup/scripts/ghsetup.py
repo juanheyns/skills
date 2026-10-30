@@ -12,15 +12,18 @@ Subcommands:
   catalog    render the check catalog as markdown (for references/checks.md)
   workflows  lint workflow files in a local checkout (top-level permissions, actions pinned to a full SHA)
   pin        rewrite `uses: owner/repo@tag` to `uses: owner/repo@<sha> # tag` in a local checkout
+  actions-in-use  list the actions the org's workflows use, and the allow list for ORG-ACTIONS-ALLOWED
   costs      read the current plan, this month's usage, budgets and Copilot seats (read only)
   scorecard  get OpenSSF Scorecard results for a repo (local CLI if installed, else api.scorecard.dev)
 
 Exit codes: 0 ok, 1 usage or API error, 2 audit found failures (only with --fail-on-findings),
-3 apply skipped a fix that needs a --set value from the user.
+3 apply skipped a fix that needs a --set value from the user, 4 apply stopped a fix because a precondition
+failed (see the [block] lines; --override after the user accepts).
 """
 
 import argparse
 import base64
+import copy
 import datetime
 import fnmatch
 import json
@@ -317,6 +320,201 @@ def lint_workflow_text(text):
     return problems
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Workflow scan through the API (actions-in-use and the preconditions use it)
+
+GITHUB_OWNED = ("actions", "github")
+RELEASE_UPLOADERS = ("actions/upload-release-asset", "softprops/action-gh-release", "svenstaro/upload-release-action")
+
+
+def fetch_text(gh, owner, repo, path, ref=None):
+    """Return the text of a file, or None if it does not exist."""
+    try:
+        f = gh.get(f"/repos/{owner}/{repo}/contents/{path}" + (f"?ref={ref}" if ref else ""))
+    except ApiError as e:
+        if e.status == 404:
+            return None
+        raise
+    if not isinstance(f, dict) or "content" not in f:
+        return None
+    return base64.b64decode(f["content"]).decode("utf-8", "replace")
+
+
+def iter_uses(text):
+    for n, line in enumerate(text.splitlines(), 1):
+        m = USES_RE.match(line)
+        if m:
+            yield n, m.group(3)
+
+
+class WorkflowScan:
+    """Read the workflows of the org's repos through the API, once per run.
+
+    It follows local composite actions, remote composite actions and reusable workflows (to `max_depth`), because
+    the Actions allow policy also applies to the actions that they use. GitHub-owned actions are not followed.
+    """
+
+    def __init__(self, gh, org, max_depth=3):
+        self.gh, self.org, self.max_depth = gh, org, max_depth
+        self._workflows = {}
+        self._texts = {}
+
+    def workflows(self, repo):
+        if repo not in self._workflows:
+            files = {}
+            try:
+                entries = self.gh.get(f"/repos/{self.org}/{repo}/contents/.github/workflows") or []
+            except ApiError as e:
+                if e.status != 404:
+                    raise
+                entries = []
+            for entry in entries:
+                if entry.get("name", "").endswith((".yml", ".yaml")):
+                    text = fetch_text(self.gh, self.org, repo, entry["path"])
+                    if text is not None:
+                        files[entry["path"]] = text
+            self._workflows[repo] = files
+        return self._workflows[repo]
+
+    def _text(self, owner, repo, paths, ref):
+        key = (owner, repo, tuple(paths), ref)
+        if key not in self._texts:
+            self._texts[key] = None
+            for p in paths:
+                try:
+                    text = fetch_text(self.gh, owner, repo, p, ref)
+                except ApiError:
+                    text = None  # private or deleted action repo: report it, do not fail the scan
+                if text is not None:
+                    self._texts[key] = (p, text)
+                    break
+        return self._texts[key]
+
+    def uses(self, repos):
+        """Yield one dict for each `uses:`: repo, file, line, ref, kind, action, version, via."""
+        for repo in repos:
+            for path, text in self.workflows(repo).items():
+                yield from self._walk(repo, path, text, None, 0)
+
+    def _walk(self, repo, path, text, via, depth):
+        for line, ref in iter_uses(text):
+            item = {"repo": repo, "file": path, "line": line, "ref": ref, "via": via}
+            if ref.startswith("docker://"):
+                yield dict(item, kind="docker", action=ref, version=None)
+                continue
+            if ref.startswith("./"):
+                yield dict(item, kind="local", action=ref, version=None)
+                sub = ref[2:].rstrip("/")
+                # `./` inside a remote action points to the caller's workspace, so only follow it from the repo.
+                if via is None and depth < self.max_depth and not sub.endswith((".yml", ".yaml")):
+                    hit = self._text(self.org, repo, [f"{sub}/action.yml", f"{sub}/action.yaml"], None)
+                    if hit:
+                        yield from self._walk(repo, hit[0], hit[1], ref, depth + 1)
+                continue
+            if "@" not in ref:
+                yield dict(item, kind="invalid", action=ref, version=None)
+                continue
+            action, version = ref.rsplit("@", 1)
+            parts = action.split("/")
+            reusable = len(parts) > 4 and parts[2] == ".github" and parts[3] == "workflows"
+            yield dict(item, kind="reusable" if reusable else "action", action=action, version=version)
+            if depth >= self.max_depth or len(parts) < 2 or parts[0].lower() in GITHUB_OWNED:
+                continue
+            sub = "/".join(parts[2:])
+            paths = [sub] if reusable else [f"{sub}/action.yml" if sub else "action.yml",
+                                            f"{sub}/action.yaml" if sub else "action.yaml"]
+            hit = self._text(parts[0], parts[1], paths, version)
+            if hit:
+                chain = f"{via} -> {ref}" if via else ref
+                yield from self._walk(repo, path, hit[1], chain, depth + 1)
+
+
+def classify_action(action, org):
+    owner = action.split("/")[0].lower()
+    if owner == org.lower():
+        return "org"
+    return "github" if owner in GITHUB_OWNED else "third_party"
+
+
+def summarize_uses(uses, org):
+    """Group `uses:` items by action (owner/repo[/path])."""
+    agg = {}
+    for u in uses:
+        if u["kind"] not in ("action", "reusable"):
+            continue
+        a = agg.setdefault(u["action"], {"action": u["action"], "class": classify_action(u["action"], org),
+                                         "kind": u["kind"], "versions": set(), "used_in": set(), "nested": False})
+        a["versions"].add(u["version"])
+        a["used_in"].add(f"{u['repo']}:{u['file']}")
+        a["nested"] = a["nested"] or bool(u["via"])
+    for a in agg.values():
+        a["versions"], a["used_in"] = sorted(a["versions"]), sorted(a["used_in"])
+    return sorted(agg.values(), key=lambda a: (a["class"], a["action"].lower()))
+
+
+def allowed_by_patterns(action, version, patterns):
+    """Approximate GitHub's allow-list match: `owner/repo@*`, `owner/*`, `owner/repo/path@v1` (case-insensitive)."""
+    ref = f"{action}@{version}".lower()
+    return any(fnmatch.fnmatchcase(ref, p.lower()) or fnmatch.fnmatchcase(action.lower(), p.lower())
+               for p in patterns if not p.startswith("!"))
+
+
+def blocked_actions(summary, patterns, github_owned_allowed=True):
+    out = []
+    for a in summary:
+        if a["class"] == "org" or (a["class"] == "github" and github_owned_allowed):
+            continue
+        if not all(allowed_by_patterns(a["action"], v, patterns) for v in a["versions"]):
+            out.append(a)
+    return out
+
+
+def suggested_patterns(summary):
+    return sorted({f"{a['action']}@*" for a in summary if a["class"] == "third_party"}, key=str.lower)
+
+
+def lint_release_text(text):
+    """Find release steps that break with immutable releases: uploads to a release that is already published.
+
+    `gh release create ... <files>` is safe: gh uploads the assets before it publishes. Returns (level, message).
+    """
+    out = []
+    # The trigger is `on: release`, `on: [push, release]`, or a `release:` key inside the `on:` block. A job that
+    # is named `release:` is not a trigger, so only read the lines of the `on:` block.
+    on_block = re.search(r"^(?:on|\"on\"|'on'):[^\n]*\n((?:[ \t]+[^\n]*\n|[ \t]*\n)*)", text + "\n", re.M)
+    on_release = bool(re.search(r"^(?:on|\"on\"|'on'):[ \t]*\[?[^\n]*\brelease\b", text, re.M) or
+                      (on_block and re.search(r"^[ \t]+release:", on_block.group(1), re.M)))
+    uploads = []
+    if re.search(r"gh\s+release\s+upload\b", text):
+        uploads.append("gh release upload")
+    for _, ref in iter_uses(text):
+        name = ref.split("@")[0].lower()
+        if name in RELEASE_UPLOADERS:
+            uploads.append(name)
+    if not uploads:
+        return out
+    if on_release:
+        out.append(("block", f"runs on a `release` event and uploads assets ({', '.join(sorted(set(uploads)))}); "
+                             "the release is already published, so the upload fails"))
+        return out
+    if "gh release upload" in uploads:
+        if re.search(r"--draft\b|draft:\s*true", text):
+            out.append(("warn", "`gh release upload` with a draft release: check that the release is still a draft "
+                                "when the assets upload, and is published after"))
+        else:
+            out.append(("block", "`gh release upload` adds assets to an existing release; if it is published, the "
+                                 "upload fails. Create it as a draft, upload, then publish (or use `gh release create` "
+                                 "with the files)"))
+    for name in sorted(set(uploads) - {"gh release upload"}):
+        if name == "actions/upload-release-asset":
+            out.append(("block", "actions/upload-release-asset adds assets to an existing release; if it is "
+                                 "published, the upload fails"))
+        elif not re.search(r"draft:\s*true", text):
+            out.append(("warn", f"{name} publishes and uploads in one step: check that it uploads before it "
+                                "publishes, or set `draft: true` and publish after"))
+    return out
+
+
 def kind_workflows(gh, check, v, cache):
     owner, repo = v["owner"], v["repo"]
     try:
@@ -467,7 +665,23 @@ def run_check(gh, check, variables, plan, visibility, cache):
         detail = {403: "no permission to read (need org owner / repo admin, or token scope)",
                   404: "not found (no permission, feature off for this plan, or endpoint not on this target)"}.get(
             e.status, str(e))
+    if status == FAIL and check.get("explain"):
+        detail = "; ".join(x for x in [detail] + explain(gh, check["explain"], variables) if x)
     return dict(base, status=status, current=current, detail=detail)
+
+
+def explain(gh, specs, variables):
+    """Name who or what a failing check affects, for example the members without 2FA."""
+    out = []
+    for spec in specs:
+        try:
+            items = gh.get(fill(spec["path"], variables), paginate=True) or []
+        except ApiError as e:
+            out.append(f"{spec['label']}: could not read ({e.status or e})")
+            continue
+        names = [str(pointer(i, spec["pluck"])) for i in items]
+        out.append(f"{spec['label']}: {', '.join(names) if names else 'none'}")
+    return out
 
 
 def audit(gh, catalog, org, plan=None, repo_selectors=None, scopes=("org", "repo"), only=None,
@@ -650,8 +864,18 @@ def plan_fix(check, r, findings, overrides=None, gh=None):
                  "merge": s.get("merge", False)} for s in fix["steps"]]
     if kind == "ruleset":
         with open(os.path.join(TEMPLATES_DIR, fix["template"])) as f:
-            body = fill(json.load(f), v)
-        return [{"method": "POST", "path": fill(fix["path"], v), "body": body, "merge": False}]
+            baseline = fill(json.load(f), v)
+        current = find_branch_ruleset(gh, findings["org"], owner, repo, v["default_branch"]) if gh else None
+        if current:
+            body, notes = upgrade_ruleset(current["body"], baseline, overrides)
+            unchanged = {k: val for k, val in current["body"].items() if k not in RULESET_READONLY}
+            if body == unchanged:
+                # Nothing to send. The step list stays non-empty so that notes and preconditions still run.
+                return [{"method": "NOOP", "path": current["path"], "body": body, "merge": False,
+                         "notes": notes + [("info", "the ruleset already meets the baseline: nothing to change")]}]
+            return [{"method": "PUT", "path": current["path"], "body": body, "merge": False, "notes": notes}]
+        return [{"method": "POST", "path": fill(fix["path"], v), "body": baseline, "merge": False,
+                 "notes": [("info", "no ruleset applies to the default branch yet: creates a new one")]}]
     if kind == "pr_file":
         with open(os.path.join(TEMPLATES_DIR, fix["template"])) as f:
             content = fill(f.read(), v)
@@ -661,6 +885,193 @@ def plan_fix(check, r, findings, overrides=None, gh=None):
                           "branch": fix.get("branch", "baseline/" + check["id"].lower()),
                           "message": fix.get("message", check["title"]), "create_repo": fix.get("create_repo")}}]
     raise ValueError(f"no automatic fix for kind {kind}")
+
+
+RULESET_READONLY = ("id", "source", "source_type", "node_id", "_links", "created_at", "updated_at",
+                    "current_user_can_bypass")
+
+
+def find_branch_ruleset(gh, org, owner, repo, branch):
+    """Find the active ruleset that protects the default branch now, so the fix can update it in place.
+
+    `rules/branches` names the ruleset of each active rule. Prefer the one with the pull_request rule, then one
+    with deletion/non_fast_forward, then a repo ruleset over an org ruleset.
+    """
+    rules = gh.get(f"/repos/{owner}/{repo}/rules/branches/{branch}", paginate=True) or []
+    sets = {}
+    for r in rules:
+        if r.get("ruleset_id") is None or r.get("ruleset_source_type") not in ("Repository", "Organization"):
+            continue
+        sets.setdefault((r["ruleset_source_type"], r["ruleset_id"]), set()).add(r["type"])
+    if not sets:
+        return None
+
+    def rank(item):
+        (source, rid), types = item
+        return ("pull_request" not in types, not ({"deletion", "non_fast_forward"} & types),
+                source != "Repository", rid)
+
+    (source, rid), _ = sorted(sets.items(), key=rank)[0]
+    path = f"/orgs/{org}/rulesets/{rid}" if source == "Organization" else f"/repos/{owner}/{repo}/rulesets/{rid}"
+    return {"path": path, "body": gh.get(path), "source_type": source}
+
+
+def upgrade_ruleset(current, baseline, overrides=None):
+    """Raise an existing ruleset to the baseline. Never weakens it.
+
+    Missing baseline rules are added. For rules that exist, booleans become `current or baseline` and numbers
+    `max(current, baseline)`; other parameters and other rules (required_status_checks, merge methods, required
+    reviewers) are kept. Bypass actors are kept unless --set bypass_actors=... was given.
+    """
+    body = {k: copy.deepcopy(val) for k, val in current.items() if k not in RULESET_READONLY}
+    notes = []
+    rules = body.setdefault("rules", [])
+    have = {r["type"]: r for r in rules}
+    raised = []
+    for b in baseline["rules"]:
+        r = have.get(b["type"])
+        if r is None:
+            rules.append(copy.deepcopy(b))
+            raised.append(f"adds {b['type']}")
+            continue
+        if not b.get("parameters"):
+            continue
+        params = r.setdefault("parameters", {})
+        for k, want in b["parameters"].items():
+            cur = params.get(k)
+            if isinstance(want, bool):
+                new = bool(cur) or want
+            elif isinstance(want, int):
+                new = max(cur or 0, want)
+            else:
+                new = want if cur is None else cur
+            if new != cur:
+                raised.append(f"{k}: {cur} -> {new}")
+            params[k] = new
+    notes.append(("info", f"updates ruleset '{current.get('name')}' in place: " + (", ".join(raised) or "no change")))
+    kept = sorted(t for t in have if t not in {b["type"] for b in baseline["rules"]})
+    if kept:
+        notes.append(("info", "keeps the other rules: " + ", ".join(kept)))
+    if overrides and "bypass_actors" in overrides:
+        body["bypass_actors"] = overrides["bypass_actors"]
+        notes.append(("warn", f"replaces bypass actors {_actors(current.get('bypass_actors'))} with "
+                              f"{_actors(body['bypass_actors'])}"))
+    else:
+        others = [a for a in body.get("bypass_actors") or [] if a.get("actor_type") != "OrganizationAdmin"]
+        if others:
+            notes.append(("warn", f"keeps bypass actors {_actors(others)}. Ask the user if each one is still needed "
+                                  "(for example a release workflow that pushes with a deploy key). Scorecard's top tier "
+                                  "needs no bypass; remove them with --set bypass_actors=[] only if nothing depends on "
+                                  "them"))
+    if current.get("source_type") == "Organization":
+        notes.append(("warn", f"org ruleset '{current.get('name')}': the change applies to every repo it targets"))
+    return body, notes
+
+
+def _actors(actors):
+    return "[" + ", ".join(f"{a.get('actor_type')}{'#' + str(a['actor_id']) if a.get('actor_id') else ''}"
+                           f"({a.get('bypass_mode', 'always')})" for a in actors or []) + "]"
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Preconditions: run before a fix; ("block", msg) stops --execute unless --override matches the finding key.
+
+
+def _step(steps, suffix):
+    return next((s for s in steps if s["path"].endswith(suffix)), None)
+
+
+def pre_reviewers(gh, ctx, r, steps, findings):
+    """With N required approvals, the user's own PRs need N other accounts with write access."""
+    step = steps[0]
+    pr = next((x for x in step["body"].get("rules", []) if x["type"] == "pull_request"), None)
+    need = (pr or {}).get("parameters", {}).get("required_approving_review_count", 0)
+    if not need:
+        return []
+    owner, _, repo = r["target"].partition("/")
+    people = gh.get(f"/repos/{owner}/{repo}/collaborators?permission=push&affiliation=all&per_page=100",
+                    paginate=True) or []
+    others = sorted(p["login"] for p in people if p.get("login") != ctx["me"] and p.get("type") != "Bot")
+    if len(others) < need:
+        return [("block", f"{need} approval(s) required, but only {len(others)} other account(s) with write access "
+                          f"({', '.join(others) or 'none'}): your own PRs could not merge. Add a reviewer with write "
+                          f"access, or use --set review_count=0")]
+    return [("info", f"accounts that can approve: {', '.join(others)}")]
+
+
+def pre_deploy_keys(gh, ctx, r, steps, findings):
+    """A ruleset without a DeployKey bypass blocks pushes from write deploy keys (for example release workflows)."""
+    body = steps[0]["body"]
+    if any(a.get("actor_type") == "DeployKey" for a in body.get("bypass_actors") or []):
+        return []
+    owner, _, repo = r["target"].partition("/")
+    keys = [k for k in gh.get(f"/repos/{owner}/{repo}/keys?per_page=100", paginate=True) or []
+            if not k.get("read_only", True)]
+    if not keys:
+        return []
+    return [("block", "deploy keys with write access: " + ", ".join(k.get("title", "?") for k in keys) +
+                      ". The ruleset has no DeployKey bypass, so their pushes to the default branch would fail. Ask "
+                      "the user; add a DeployKey bypass with --set bypass_actors='[{\"actor_id\": null, "
+                      "\"actor_type\": \"DeployKey\", \"bypass_mode\": \"always\"}]' if they are still used")]
+
+
+def pre_actions_allowlist(gh, ctx, r, steps, findings):
+    step = _step(steps, "/selected-actions")
+    if not step:
+        return []
+    body = step["body"]
+    summary = summarize_uses(ctx["scan"].uses(findings["repos"]), findings["org"])
+    blocked = blocked_actions(summary, body.get("patterns_allowed") or [], body.get("github_owned_allowed", True))
+    if not blocked:
+        return [("info", f"all {len(summary)} actions in use are allowed by this policy")]
+    lines = [f"{a['action']} ({', '.join(a['used_in'][:3])}{', ...' if len(a['used_in']) > 3 else ''}"
+             f"{', nested' if a['nested'] else ''})" for a in blocked]
+    verified = " They still run if the creator is Marketplace-verified, but that cannot be read through the API." \
+        if body.get("verified_allowed") else ""
+    return [("block", f"{len(blocked)} action(s) in use are not allowed: " + "; ".join(lines) + "." + verified +
+                      " Run `ghsetup.py actions-in-use <org>` and pass its --set patterns_allowed=... line")]
+
+
+def pre_sha_pinning(gh, ctx, r, steps, findings):
+    out, direct, nested = [], [], []
+    for u in ctx["scan"].uses(findings["repos"]):
+        if u["kind"] != "action" or SHA_RE.match(u["version"] or ""):
+            continue
+        (nested if u["via"] else direct).append(f"{u['repo']}:{u['file']}:{u['line']} {u['ref']}")
+    if direct:
+        out.append(("block", f"{len(direct)} unpinned action reference(s) in workflows: " + "; ".join(direct[:10]) +
+                             ("; ..." if len(direct) > 10 else "") + ". Run `ghsetup.py pin` on each repo first"))
+    if nested:
+        out.append(("warn", f"{len(nested)} unpinned reference(s) inside composite actions or reusable workflows "
+                            "(not in your repos): " + "; ".join(nested[:5]) + ("; ..." if len(nested) > 5 else "")))
+    return out
+
+
+def pre_release_assets(gh, ctx, r, steps, findings):
+    out = []
+    for repo in findings["repos"]:
+        for path, text in ctx["scan"].workflows(repo).items():
+            out += [(level, f"{repo}:{path}: {msg}") for level, msg in lint_release_text(text)]
+    return out
+
+
+PRECONDITIONS = {
+    "reviewers": pre_reviewers,
+    "deploy_keys": pre_deploy_keys,
+    "actions_allowlist": pre_actions_allowlist,
+    "sha_pinning": pre_sha_pinning,
+    "release_assets": pre_release_assets,
+}
+
+
+def run_preconditions(gh, ctx, check, r, steps, findings):
+    notes = []
+    for name in check["fix"].get("preconditions", []):
+        try:
+            notes += PRECONDITIONS[name](gh, ctx, r, steps, findings)
+        except ApiError as e:
+            notes.append(("warn", f"could not check {name}: {e}"))
+    return notes
 
 
 def open_file_pr(gh, repo_path, spec, org):
@@ -710,7 +1121,14 @@ def parse_sets(pairs):
     return out
 
 
-def apply(gh, catalog, findings, patterns, all_free, accept_cost, execute, out=sys.stdout, overrides=None):
+def apply(gh, catalog, findings, patterns, all_free, accept_cost, execute, out=None, overrides=None,
+          override_blocks=()):
+    """Plan, check preconditions, and (with execute) run the fixes for the selected findings.
+
+    A precondition note with level `block` stops --execute for that finding unless a pattern in `override_blocks`
+    matches its key or check ID (the user accepted the risk).
+    """
+    out = out or sys.stdout
     by_id = {c["id"]: c for c in catalog["checks"]}
     chosen = select_findings(findings, patterns, all_free)
     log = []
@@ -729,17 +1147,37 @@ def apply(gh, catalog, findings, patterns, all_free, accept_cost, execute, out=s
             print(f"  {r['key']}  ({r['availability']})", file=out)
         chosen = [r for r in chosen if r not in blocked]
     seen = set()
+    ctx = {"scan": WorkflowScan(gh, findings["org"]), "me": None}
     for r in chosen:
         check = by_id[r["id"]]
         try:
             steps = plan_fix(check, r, findings, overrides, gh)
+            if ctx["me"] is None and check["fix"].get("preconditions"):
+                ctx["me"] = (gh.get("/user") or {}).get("login")
+            notes = [n for s in steps for n in s.get("notes", [])]
+            notes += run_preconditions(gh, ctx, check, r, steps, findings)
         except (MissingParams, ApiError) as e:
             print(f"[skipped] {e}", file=out)
             log.append({"key": r["key"], "ok": False, "error": str(e), "executed": False,
                         "needs_input": isinstance(e, MissingParams)})
             continue
+        overridden = any(fnmatch.fnmatch(r["key"], p) or fnmatch.fnmatch(r["id"], p) for p in override_blocks)
+        blocks = [m for level, m in notes if level == "block"]
+        for level, msg in notes:
+            shown_level = "block, overridden" if level == "block" and overridden else level
+            print(f"    [{shown_level}] {r['key']}: {msg}", file=out)
+        if blocks and not overridden:
+            print(f"[blocked] {r['key']}: a precondition failed. Fix it, or ask the user and re-run with "
+                  f"--override '{r['key']}'", file=out)
+            log.append({"key": r["key"], "ok": False, "executed": False, "blocked": blocks, "notes": notes})
+            continue
         for step in steps:
             method, path, body = step["method"], step["path"], step["body"]
+            if method == "NOOP":
+                print(f"[no change] {r['key']}: {path} already meets the baseline", file=out)
+                log.append({"key": r["key"], "method": method, "path": path, "executed": False, "ok": True,
+                            "notes": notes})
+                continue
             # One org-level fix (for example an org ruleset) can close the same finding on many repos: run it once.
             sig = (method, path, json.dumps(body, sort_keys=True))
             if sig in seen:
@@ -747,7 +1185,8 @@ def apply(gh, catalog, findings, patterns, all_free, accept_cost, execute, out=s
                             "ok": True, "note": "same step already planned for another finding"})
                 continue
             seen.add(sig)
-            entry = {"key": r["key"], "method": method, "path": path, "body": body, "executed": execute}
+            entry = {"key": r["key"], "method": method, "path": path, "body": body, "executed": execute,
+                     "notes": notes}
             if not execute:
                 shown = json.dumps(body) if body is not None else ""
                 if method == "PR_FILE":
@@ -948,6 +1387,30 @@ def costs_markdown(c, catalog):
     return "\n".join(lines) + "\n"
 
 
+def actions_in_use_markdown(org, summary, uses):
+    lines = [f"# Actions in use: {org}", "",
+             "From the workflows of all scanned repos, with local and remote composite actions and reusable workflows "
+             "followed. `org` and GitHub-owned (`actions/*`, `github/*`) actions are allowed by the `selected` policy "
+             "with github_owned_allowed=true; third-party actions must be in patterns_allowed (or come from a "
+             "Marketplace-verified creator, which the API cannot show).", "",
+             "| Action | Class | Kind | Versions | Pinned | Nested | Used in |", "| --- | --- | --- | --- | --- | --- | --- |"]
+    for a in summary:
+        pinned = "yes" if all(SHA_RE.match(v or "") for v in a["versions"]) else "no"
+        lines.append("| " + " | ".join(_cell(x) for x in (
+            a["action"], a["class"], a["kind"], ", ".join(v[:12] for v in a["versions"]), pinned,
+            "yes" if a["nested"] else "", ", ".join(a["used_in"]))) + " |")
+    docker = sorted({u["action"] for u in uses if u["kind"] == "docker"})
+    if docker:
+        lines += ["", "Container actions (`docker://`): " + ", ".join(docker)]
+    pats = suggested_patterns(summary)
+    lines += ["", "## Allow list for ORG-ACTIONS-ALLOWED", ""]
+    if pats:
+        lines += ["```sh", "--set patterns_allowed='" + json.dumps(pats) + "'", "```"]
+    else:
+        lines.append("No third-party actions: patterns_allowed=[] is enough.")
+    return "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # CLI
 
@@ -983,6 +1446,8 @@ def main(argv=None, gh=None):
     ap.add_argument("--execute", action="store_true", help="really call the API (default is a dry run)")
     ap.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE",
                     help="template parameters, e.g. review_count=0 (values parsed as JSON when possible)")
+    ap.add_argument("--override", nargs="*", default=[], metavar="KEY",
+                    help="finding key or check ID globs whose blocking preconditions the user accepted")
     ap.add_argument("--log", help="write the apply log JSON here")
 
     sub.add_parser("catalog", help="markdown of all checks")
@@ -993,6 +1458,11 @@ def main(argv=None, gh=None):
     pn = sub.add_parser("pin", help="pin actions to full commit SHAs in a local checkout")
     pn.add_argument("path", nargs="?", default=".")
     pn.add_argument("--write", action="store_true", help="rewrite files (default: show changes only)")
+
+    ai = sub.add_parser("actions-in-use", help="list the actions that the org's workflows use (read only)")
+    ai.add_argument("org")
+    ai.add_argument("--repos", nargs="*", help="repo name globs (default: all non-archived, non-fork)")
+    ai.add_argument("--json", action="store_true")
 
     co = sub.add_parser("costs", help="read current plan, usage, budgets and Copilot seats (read only)")
     co.add_argument("org")
@@ -1063,7 +1533,7 @@ def main(argv=None, gh=None):
             with open(args.findings) as f:
                 findings = json.load(f)
             log = apply(gh, catalog, findings, args.select, args.all_free, set(args.accept_cost), args.execute,
-                        overrides=parse_sets(args.set))
+                        overrides=parse_sets(args.set), override_blocks=args.override)
             if args.execute and log:
                 keys = {e["key"] for e in log if e.get("ok")}
                 for res in verify(gh, catalog, findings, keys):
@@ -1071,9 +1541,21 @@ def main(argv=None, gh=None):
             if args.log:
                 with open(args.log, "w") as f:
                     json.dump(log, f, indent=2)
-            if any(e.get("ok") is False and not e.get("needs_input") for e in log):
+            if any(e.get("ok") is False and not e.get("needs_input") and not e.get("blocked") for e in log):
                 return 1
+            if any(e.get("blocked") for e in log):
+                return 4
             return 3 if any(e.get("needs_input") for e in log) else 0
+        if args.cmd == "actions-in-use":
+            repos = [x["name"] for x in list_repos(gh, args.org, args.repos)]
+            uses = list(WorkflowScan(gh, args.org).uses(repos))
+            summary = summarize_uses(uses, args.org)
+            if args.json:
+                print(json.dumps({"org": args.org, "repos": repos, "actions": summary,
+                                  "patterns_allowed": suggested_patterns(summary)}, indent=2))
+            else:
+                print(actions_in_use_markdown(args.org, summary, uses))
+            return 0
         if args.cmd == "costs":
             c = costs(gh, args.org)
             print(json.dumps(c, indent=2) if args.json else costs_markdown(c, catalog))

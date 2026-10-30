@@ -46,10 +46,22 @@
       "expect": {"op": "eq", "value": true},
       "fix": {"kind": "manual"},
       "manual": "UI only: Settings > Authentication security > Require two-factor authentication. Tell members first. Also consider 'Only allow secure two-factor methods'.",
-      "destructive": "Outside collaborators without 2FA are removed from the org (members stay, but are blocked until they enable 2FA).",
+      "destructive": "Outside collaborators without 2FA are removed from the org; members without 2FA stay but are blocked until they enable it. The finding detail names them: tell each one before you turn it on.",
+      "explain": [
+        {"label": "members without 2FA (they keep membership but are blocked from org resources)",
+         "path": "/orgs/{org}/members?filter=2fa_disabled&per_page=100", "pluck": "login"},
+        {"label": "outside collaborators without 2FA (removed when you turn this on)",
+         "path": "/orgs/{org}/outside_collaborators?filter=2fa_disabled&per_page=100", "pluck": "login"},
+        {"label": "members with only insecure 2FA (SMS)",
+         "path": "/orgs/{org}/members?filter=2fa_insecure&per_page=100", "pluck": "login"},
+        {"label": "outside collaborators with only insecure 2FA (removed if you also require secure methods)",
+         "path": "/orgs/{org}/outside_collaborators?filter=2fa_insecure&per_page=100", "pluck": "login"}
+      ],
       "source": [
         "https://docs.github.com/en/organizations/keeping-your-organization-secure/managing-two-factor-authentication-for-your-organization/requiring-two-factor-authentication-in-your-organization",
-        "https://github.blog/changelog/2024-11-07-organizations-can-now-enable-2fa-requirement-without-removing-non-compliant-members-ga/"
+        "https://github.blog/changelog/2024-11-07-organizations-can-now-enable-2fa-requirement-without-removing-non-compliant-members-ga/",
+        "https://docs.github.com/en/rest/orgs/members#list-organization-members",
+        "https://docs.github.com/en/rest/orgs/outside-collaborators#list-outside-collaborators-for-an-organization"
       ]
     },
     {
@@ -213,8 +225,8 @@
         {"method": "PUT", "path": "/orgs/{org}/actions/permissions", "body": {"allowed_actions": "selected"}, "merge": true},
         {"method": "PUT", "path": "/orgs/{org}/actions/permissions/selected-actions",
          "body": {"github_owned_allowed": true, "verified_allowed": "{verified_allowed}", "patterns_allowed": "{patterns_allowed}"}}
-      ], "params": {"verified_allowed": true, "patterns_allowed": []}},
-      "destructive": "Workflows that use an action outside the allow list stop running. List the actions in use first and put them in patterns_allowed.",
+      ], "params": {"verified_allowed": true, "patterns_allowed": []}, "preconditions": ["actions_allowlist"]},
+      "destructive": "Workflows that use an action outside the allow list stop running. Run `ghsetup.py actions-in-use <org>` and pass its --set patterns_allowed=... line; the dry run blocks if an action in use is not allowed.",
       "source": [
         "https://docs.github.com/en/rest/actions/permissions",
         "https://docs.github.com/en/organizations/managing-organization-settings/disabling-or-limiting-github-actions-for-your-organization",
@@ -230,8 +242,9 @@
       "availability": {"free": "free", "team": "free"},
       "read": {"path": "/orgs/{org}/actions/permissions", "pointer": "sha_pinning_required", "missing_is": false},
       "expect": {"op": "eq", "value": true},
-      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/orgs/{org}/actions/permissions", "body": {"sha_pinning_required": true}, "merge": true}]},
-      "destructive": "Workflows with unpinned actions fail. Run `ghsetup.py pin` on each repo first.",
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/orgs/{org}/actions/permissions", "body": {"sha_pinning_required": true}, "merge": true}],
+              "preconditions": ["sha_pinning"]},
+      "destructive": "Workflows with unpinned actions fail. The dry run lists them and blocks; run `ghsetup.py pin` on each repo first.",
       "scorecard": ["Pinned-Dependencies"],
       "source": [
         "https://docs.github.com/en/rest/actions/permissions",
@@ -330,8 +343,9 @@
       "availability": {"free": "free", "team": "free"},
       "read": {"path": "/orgs/{org}/settings/immutable-releases", "pointer": "enforced_repositories"},
       "expect": {"op": "eq", "value": "all"},
-      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/orgs/{org}/settings/immutable-releases", "body": {"enforced_repositories": "all"}}]},
-      "destructive": "Release workflows that change assets or move a tag after the release is published fail. Applies to new releases only.",
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/orgs/{org}/settings/immutable-releases", "body": {"enforced_repositories": "all"}}],
+              "preconditions": ["release_assets"]},
+      "destructive": "Release workflows that upload assets after the release is published (gh release upload on a published release, a workflow on the `release` event that uploads) fail. The dry run lists them; `gh release create` with the files is safe. Applies to new releases only.",
       "scorecard": ["Pinned-Dependencies"],
       "source": [
         "https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases",
@@ -440,19 +454,22 @@
       "fix": {
         "kind": "ruleset",
         "params": {"review_count": 1, "require_code_owner_review": false, "require_last_push_approval": true, "bypass_actors": []},
+        "preconditions": ["reviewers", "deploy_keys"],
         "by_plan": {
           "free": {"template": "ruleset-repo-default-branch.json", "path": "/repos/{owner}/{repo}/rulesets"},
           "team": {"template": "ruleset-org-default-branch.json", "path": "/orgs/{org}/rulesets"}
         }
       },
-      "destructive": "Direct pushes to the default branch stop. With review_count=1 a solo maintainer cannot merge alone: ask the user how many people can review.",
+      "destructive": "Direct pushes to the default branch stop. The fix updates the ruleset that protects the default branch now (it keeps status checks, merge methods and bypass actors, and never lowers a value), or creates one. The dry run blocks if nobody else with write access can approve, or if write deploy keys would lose their push.",
       "scorecard": ["Branch-Protection", "Code-Review"],
       "source": [
         "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets",
         "https://docs.github.com/en/rest/repos/rules",
         "https://docs.github.com/en/rest/orgs/rules",
         "https://github.blog/changelog/2025-06-16-organization-rulesets-now-available-for-github-team-plans/",
-        "https://github.com/ossf/scorecard/blob/v5.6.0/docs/checks.md#branch-protection"
+        "https://github.com/ossf/scorecard/blob/v5.6.0/docs/checks.md#branch-protection",
+        "https://docs.github.com/en/rest/collaborators/collaborators#list-repository-collaborators",
+        "https://docs.github.com/en/rest/deploy-keys/deploy-keys"
       ]
     },
     {
