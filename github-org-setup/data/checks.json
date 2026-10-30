@@ -1,0 +1,722 @@
+{
+  "verified_on": "2026-10-30",
+  "plans": ["free", "team"],
+  "products": {
+    "secret_protection": {
+      "name": "GitHub Secret Protection",
+      "billing_unit": "unique active committer per month (metered on Team; billing starts when you enable it)",
+      "pricing_urls": [
+        "https://github.com/security/plans",
+        "https://docs.github.com/en/billing/concepts/product-billing/github-advanced-security"
+      ]
+    },
+    "code_security": {
+      "name": "GitHub Code Security",
+      "billing_unit": "unique active committer per month (metered on Team; billing starts when you enable it), plus GitHub Actions minutes for code scanning",
+      "pricing_urls": [
+        "https://github.com/security/plans",
+        "https://docs.github.com/en/billing/concepts/product-billing/github-advanced-security",
+        "https://docs.github.com/en/billing/reference/actions-runner-pricing"
+      ]
+    }
+  },
+  "pricing_pages": [
+    "https://github.com/pricing",
+    "https://docs.github.com/en/billing/reference/product-usage-included",
+    "https://docs.github.com/en/billing/concepts/product-billing/github-actions",
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+    "https://github.com/security/plans",
+    "https://docs.github.com/en/billing/concepts/product-billing/github-advanced-security",
+    "https://github.com/features/copilot/plans",
+    "https://docs.github.com/en/copilot/concepts/billing/usage-based-billing-for-organizations-and-enterprises",
+    "https://docs.github.com/en/billing/concepts/product-billing/github-codespaces",
+    "https://docs.github.com/en/billing/concepts/product-billing/github-packages",
+    "https://docs.github.com/en/billing/concepts/product-billing/git-lfs",
+    "https://docs.github.com/en/billing/concepts/budgets-and-alerts"
+  ],
+  "checks": [
+    {
+      "id": "ORG-2FA",
+      "scope": "org",
+      "title": "Require two-factor authentication for everyone in the org",
+      "severity": "high",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}", "pointer": "two_factor_requirement_enabled"},
+      "expect": {"op": "eq", "value": true},
+      "fix": {"kind": "manual"},
+      "manual": "UI only: Settings > Authentication security > Require two-factor authentication. Tell members first. Also consider 'Only allow secure two-factor methods'.",
+      "destructive": "Outside collaborators without 2FA are removed from the org (members stay, but are blocked until they enable 2FA).",
+      "source": [
+        "https://docs.github.com/en/organizations/keeping-your-organization-secure/managing-two-factor-authentication-for-your-organization/requiring-two-factor-authentication-in-your-organization",
+        "https://github.blog/changelog/2024-11-07-organizations-can-now-enable-2fa-requirement-without-removing-non-compliant-members-ga/"
+      ]
+    },
+    {
+      "id": "ORG-OWNERS",
+      "scope": "org",
+      "title": "At least two org owners",
+      "severity": "medium",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}/members?role=admin&per_page=100", "pointer": "#length"},
+      "expect": {"op": "gte", "value": 2},
+      "fix": {"kind": "manual"},
+      "manual": "Make a second trusted person an owner (People > member > Change role). Keep owners few, but not fewer than two.",
+      "source": [
+        "https://docs.github.com/en/organizations/collaborating-with-groups-in-organizations/best-practices-for-organizations",
+        "https://docs.github.com/en/organizations/managing-peoples-access-to-your-organization-with-roles/roles-in-an-organization"
+      ]
+    },
+    {
+      "id": "ORG-BASE-PERMISSION",
+      "scope": "org",
+      "title": "Base repository permission is read or none",
+      "severity": "high",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}", "pointer": "default_repository_permission"},
+      "expect": {"op": "in", "value": ["read", "none"]},
+      "fix": {"kind": "api", "steps": [{"method": "PATCH", "path": "/orgs/{org}", "body": {"default_repository_permission": "read"}}]},
+      "destructive": "Members lose write access that came only from the base permission. Give write access through teams first.",
+      "source": [
+        "https://docs.github.com/en/organizations/managing-user-access-to-your-organizations-repositories/managing-repository-roles/setting-base-permissions-for-an-organization",
+        "https://docs.github.com/en/code-security/tutorials/secure-your-organization/protect-against-threats",
+        "https://docs.github.com/en/rest/orgs/orgs#update-an-organization"
+      ]
+    },
+    {
+      "id": "ORG-NO-PRIVATE-FORKS",
+      "scope": "org",
+      "title": "Members cannot fork private repositories",
+      "severity": "medium",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}", "pointer": "members_can_fork_private_repositories", "missing_is": false},
+      "expect": {"op": "eq", "value": false},
+      "fix": {"kind": "api", "steps": [{"method": "PATCH", "path": "/orgs/{org}", "body": {"members_can_fork_private_repositories": false}}]},
+      "source": [
+        "https://docs.github.com/en/organizations/managing-organization-settings/managing-the-forking-policy-for-your-organization",
+        "https://docs.github.com/en/code-security/tutorials/secure-your-organization/best-practices-for-preventing-data-leaks-in-your-organization"
+      ]
+    },
+    {
+      "id": "ORG-APP-ACCESS",
+      "scope": "org",
+      "title": "Review third-party access: OAuth app restrictions, installed GitHub Apps, PAT policy",
+      "severity": "medium",
+      "kind": "manual",
+      "availability": {"free": "free", "team": "free"},
+      "manual": "UI only. Settings > Third-party access: keep OAuth app access restrictions on and review approved apps. Settings > GitHub Apps: remove apps you do not use. Settings > Personal access tokens: require approval for fine-grained PATs, set a maximum lifetime, and restrict classic PATs if you can.",
+      "source": [
+        "https://docs.github.com/en/organizations/managing-oauth-access-to-your-organizations-data/about-oauth-app-access-restrictions",
+        "https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization",
+        "https://docs.github.com/en/code-security/tutorials/secure-your-organization/protect-against-threats"
+      ]
+    },
+    {
+      "id": "ORG-MEMBER-PRIVILEGES",
+      "scope": "org",
+      "title": "Review member privileges: repo deletion/transfer and visibility change",
+      "severity": "medium",
+      "kind": "manual",
+      "availability": {"free": "free", "team": "free"},
+      "manual": "UI only. Settings > Member privileges: turn off 'Allow members to delete or transfer repositories' and 'Allow members to change repository visibilities'.",
+      "source": [
+        "https://docs.github.com/en/organizations/managing-organization-settings/setting-permissions-for-deleting-or-transferring-repositories",
+        "https://docs.github.com/en/organizations/managing-organization-settings/restricting-repository-visibility-changes-in-your-organization",
+        "https://docs.github.com/en/code-security/tutorials/secure-your-organization/best-practices-for-preventing-data-leaks-in-your-organization"
+      ]
+    },
+    {
+      "id": "ORG-SECURITY-MD",
+      "scope": "org",
+      "title": "Default SECURITY.md in the public org .github repository",
+      "severity": "medium",
+      "kind": "file_any",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"repo": ".github", "paths": ["SECURITY.md", ".github/SECURITY.md", "docs/SECURITY.md"]},
+      "fix": {
+        "kind": "pr_file",
+        "repo": ".github",
+        "path": "SECURITY.md",
+        "template": "SECURITY.md",
+        "message": "Add a default security policy for the organization",
+        "params": {"security_contact": null, "ack_days": 3, "assess_days": 10},
+        "create_repo": {"name": ".github", "visibility": "public", "auto_init": true,
+                        "description": "Default community health files for the organization"}
+      },
+      "scorecard": ["Security-Policy"],
+      "source": [
+        "https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file",
+        "https://github.com/ossf/scorecard/blob/v5.6.0/checks/raw/security_policy.go"
+      ]
+    },
+    {
+      "id": "ORG-SECCONFIG-PUBLIC-DEFAULT",
+      "scope": "org",
+      "title": "New public repos get a security configuration by default",
+      "severity": "high",
+      "kind": "list_match",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}/code-security/configurations/defaults", "label": "configuration.name"},
+      "expect": {"any": [[{"pointer": "default_for_new_repos", "op": "in", "value": ["public", "all"]}]],
+                 "fail_note": "no configuration is the default for new public repos"},
+      "fix": {
+        "kind": "api",
+        "resolve": {"recommended_id": {"path": "/orgs/{org}/code-security/configurations?target_type=global",
+                                       "find": {"name": "GitHub recommended"}, "pointer": "id"}},
+        "steps": [{"method": "PUT", "path": "/orgs/{org}/code-security/configurations/{recommended_id}/defaults",
+                   "body": {"default_for_new_repos": "public"}}]
+      },
+      "scorecard": ["SAST", "Vulnerabilities"],
+      "source": [
+        "https://docs.github.com/en/rest/code-security/configurations",
+        "https://github.blog/changelog/2026-04-21-deprecation-of-security-related-organization-api-fields/"
+      ]
+    },
+    {
+      "id": "ORG-SECCONFIG-NO-SURPRISE-COST",
+      "scope": "org",
+      "title": "No paid security configuration is the default for new private repos (unless the user opted in)",
+      "severity": "high",
+      "kind": "list_match",
+      "availability": {"free": "free", "team": "free"},
+      "when": [{"var": "plan", "op": "eq", "value": "team"}],
+      "when_note": "only Team orgs can buy Secret Protection or Code Security for private repos",
+      "read": {"path": "/orgs/{org}/code-security/configurations/defaults", "label": "configuration.name"},
+      "expect": {"none": [
+        [{"pointer": "default_for_new_repos", "op": "in", "value": ["all", "private_and_internal"]},
+         {"pointer": "configuration.advanced_security", "op": "in", "value": ["enabled", "code_security", "secret_protection"]}],
+        [{"pointer": "default_for_new_repos", "op": "in", "value": ["all", "private_and_internal"]},
+         {"pointer": "configuration.code_security", "op": "eq", "value": "enabled"}],
+        [{"pointer": "default_for_new_repos", "op": "in", "value": ["all", "private_and_internal"]},
+         {"pointer": "configuration.secret_protection", "op": "eq", "value": "enabled"}]
+      ], "fail_note": "every new private repo starts metered per-committer billing. Pass if the user chose this; else set this configuration's default to 'public'"},
+      "fix": {"kind": "manual"},
+      "manual": "Ask the user. If they did not opt in to the cost: PUT /orgs/{org}/code-security/configurations/{id}/defaults with default_for_new_repos=public.",
+      "source": [
+        "https://docs.github.com/en/rest/code-security/configurations",
+        "https://docs.github.com/en/billing/how-tos/products/buy-advanced-security"
+      ]
+    },
+    {
+      "id": "ORG-ACTIONS-ALLOWED",
+      "scope": "org",
+      "title": "Only selected actions may run (GitHub-owned and verified creators, plus an allow list)",
+      "severity": "medium",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}/actions/permissions", "pointer": "allowed_actions"},
+      "expect": {"op": "in", "value": ["selected", "local_only"]},
+      "fix": {"kind": "api", "steps": [
+        {"method": "PUT", "path": "/orgs/{org}/actions/permissions", "body": {"allowed_actions": "selected"}, "merge": true},
+        {"method": "PUT", "path": "/orgs/{org}/actions/permissions/selected-actions",
+         "body": {"github_owned_allowed": true, "verified_allowed": "{verified_allowed}", "patterns_allowed": "{patterns_allowed}"}}
+      ], "params": {"verified_allowed": true, "patterns_allowed": []}},
+      "destructive": "Workflows that use an action outside the allow list stop running. List the actions in use first and put them in patterns_allowed.",
+      "source": [
+        "https://docs.github.com/en/rest/actions/permissions",
+        "https://docs.github.com/en/organizations/managing-organization-settings/disabling-or-limiting-github-actions-for-your-organization",
+        "https://docs.github.com/en/actions/reference/security/secure-use"
+      ]
+    },
+    {
+      "id": "ORG-ACTIONS-SHA-PINNING",
+      "scope": "org",
+      "title": "Require actions to be pinned to a full-length commit SHA",
+      "severity": "medium",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}/actions/permissions", "pointer": "sha_pinning_required", "missing_is": false},
+      "expect": {"op": "eq", "value": true},
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/orgs/{org}/actions/permissions", "body": {"sha_pinning_required": true}, "merge": true}]},
+      "destructive": "Workflows with unpinned actions fail. Run `ghsetup.py pin` on each repo first.",
+      "scorecard": ["Pinned-Dependencies"],
+      "source": [
+        "https://docs.github.com/en/rest/actions/permissions",
+        "https://github.blog/changelog/2025-08-15-github-actions-policy-now-supports-blocking-and-sha-pinning-actions/",
+        "https://docs.github.com/en/actions/reference/security/secure-use"
+      ]
+    },
+    {
+      "id": "ORG-ACTIONS-TOKEN-READ",
+      "scope": "org",
+      "title": "Default GITHUB_TOKEN permission is read-only",
+      "severity": "high",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}/actions/permissions/workflow", "pointer": "default_workflow_permissions"},
+      "expect": {"op": "eq", "value": "read"},
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/orgs/{org}/actions/permissions/workflow", "body": {"default_workflow_permissions": "read"}, "merge": true}]},
+      "destructive": "Workflows that write (releases, comments, pushes) without a `permissions:` block start to fail.",
+      "scorecard": ["Token-Permissions"],
+      "source": [
+        "https://docs.github.com/en/rest/actions/permissions",
+        "https://docs.github.com/en/actions/reference/security/secure-use"
+      ]
+    },
+    {
+      "id": "ORG-ACTIONS-NO-PR-APPROVAL",
+      "scope": "org",
+      "title": "Workflows cannot create or approve pull requests",
+      "severity": "high",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}/actions/permissions/workflow", "pointer": "can_approve_pull_request_reviews"},
+      "expect": {"op": "eq", "value": false},
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/orgs/{org}/actions/permissions/workflow", "body": {"can_approve_pull_request_reviews": false}, "merge": true}]},
+      "destructive": "Bots that open or approve PRs with GITHUB_TOKEN stop working.",
+      "source": [
+        "https://docs.github.com/en/rest/actions/permissions",
+        "https://docs.github.com/en/organizations/managing-organization-settings/disabling-or-limiting-github-actions-for-your-organization"
+      ]
+    },
+    {
+      "id": "ORG-ACTIONS-FORK-APPROVAL",
+      "scope": "org",
+      "title": "Workflows from all external contributors need approval",
+      "severity": "medium",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}/actions/permissions/fork-pr-contributor-approval", "pointer": "approval_policy"},
+      "expect": {"op": "eq", "value": "all_external_contributors"},
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/orgs/{org}/actions/permissions/fork-pr-contributor-approval", "body": {"approval_policy": "all_external_contributors"}}]},
+      "source": [
+        "https://docs.github.com/en/rest/actions/permissions",
+        "https://docs.github.com/en/actions/reference/security/secure-use"
+      ]
+    },
+    {
+      "id": "ORG-ACTIONS-FORK-PRIVATE-SECRETS",
+      "scope": "org",
+      "title": "Fork PR workflows in private repos get no secrets and no write token",
+      "severity": "high",
+      "kind": "list_match",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}/actions/permissions/fork-pr-workflows-private-repos", "pointer": "#wrap"},
+      "expect": {"none": [[{"pointer": "send_secrets_and_variables", "op": "eq", "value": true}],
+                          [{"pointer": "send_write_tokens_to_workflows", "op": "eq", "value": true}]],
+                 "fail_note": "fork PRs can read secrets or get a write token"},
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/orgs/{org}/actions/permissions/fork-pr-workflows-private-repos",
+                                        "body": {"send_secrets_and_variables": false, "send_write_tokens_to_workflows": false}, "merge": true}]},
+      "source": [
+        "https://docs.github.com/en/rest/actions/permissions",
+        "https://docs.github.com/en/actions/reference/security/secure-use"
+      ]
+    },
+    {
+      "id": "ORG-ACTIONS-SELF-HOSTED",
+      "scope": "org",
+      "title": "Repositories cannot add their own self-hosted runners",
+      "severity": "medium",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}/actions/permissions/self-hosted-runners", "pointer": "enabled_repositories"},
+      "expect": {"op": "in", "value": ["none", "selected"]},
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/orgs/{org}/actions/permissions/self-hosted-runners", "body": {"enabled_repositories": "none"}}]},
+      "destructive": "Repository-level self-hosted runners can no longer be added. Check that no repo depends on one.",
+      "source": [
+        "https://docs.github.com/en/rest/actions/permissions",
+        "https://docs.github.com/en/actions/reference/security/secure-use"
+      ]
+    },
+    {
+      "id": "ORG-IMMUTABLE-RELEASES",
+      "scope": "org",
+      "title": "Immutable releases are enforced for all repositories",
+      "severity": "medium",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/orgs/{org}/settings/immutable-releases", "pointer": "enforced_repositories"},
+      "expect": {"op": "eq", "value": "all"},
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/orgs/{org}/settings/immutable-releases", "body": {"enforced_repositories": "all"}}]},
+      "destructive": "Release workflows that change assets or move a tag after the release is published fail. Applies to new releases only.",
+      "scorecard": ["Pinned-Dependencies"],
+      "source": [
+        "https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases",
+        "https://docs.github.com/en/rest/orgs/orgs",
+        "https://github.blog/changelog/2025-10-28-immutable-releases-are-now-generally-available/"
+      ]
+    },
+    {
+      "id": "ORG-BUDGET-ACTIONS",
+      "scope": "org",
+      "title": "A budget limits GitHub Actions spend",
+      "severity": "medium",
+      "kind": "list_match",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/organizations/{org}/settings/billing/budgets", "pointer": "budgets", "label": "budget_amount"},
+      "expect": {"any": [[{"pointer": "budget_product_sku", "op": "in", "value": ["actions"]}]],
+                 "fail_note": "no Actions budget: usage beyond the included amount is billed without a limit (if a payment method is on file)"},
+      "fix": {"kind": "api", "params": {"budget_amount": null, "prevent_further_usage": true, "alert_recipients": null},
+              "steps": [{"method": "POST", "path": "/organizations/{org}/settings/billing/budgets", "body": {
+                "budget_type": "ProductPricing", "budget_product_sku": "actions", "budget_scope": "organization",
+                "budget_amount": "{budget_amount}", "prevent_further_usage": "{prevent_further_usage}",
+                "budget_alerting": {"will_alert": true, "alert_recipients": "{alert_recipients}"}}}]},
+      "destructive": "With prevent_further_usage=true, private-repo workflows stop when the budget is used up.",
+      "source": [
+        "https://docs.github.com/en/rest/billing/budgets",
+        "https://docs.github.com/en/billing/concepts/budgets-and-alerts",
+        "https://docs.github.com/en/billing/reference/product-usage-included"
+      ]
+    },
+    {
+      "id": "ORG-BUDGET-PACKAGES",
+      "scope": "org",
+      "title": "A budget limits GitHub Packages spend",
+      "severity": "low",
+      "kind": "list_match",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/organizations/{org}/settings/billing/budgets", "pointer": "budgets", "label": "budget_amount"},
+      "expect": {"any": [[{"pointer": "budget_product_sku", "op": "in", "value": ["packages"]}]],
+                 "fail_note": "no Packages budget: private package storage and transfer beyond the included amount are billed without a limit"},
+      "fix": {"kind": "api", "params": {"budget_amount": null, "prevent_further_usage": true, "alert_recipients": null},
+              "steps": [{"method": "POST", "path": "/organizations/{org}/settings/billing/budgets", "body": {
+                "budget_type": "ProductPricing", "budget_product_sku": "packages", "budget_scope": "organization",
+                "budget_amount": "{budget_amount}", "prevent_further_usage": "{prevent_further_usage}",
+                "budget_alerting": {"will_alert": true, "alert_recipients": "{alert_recipients}"}}}]},
+      "source": [
+        "https://docs.github.com/en/rest/billing/budgets",
+        "https://docs.github.com/en/billing/concepts/product-billing/github-packages"
+      ]
+    },
+    {
+      "id": "ORG-BUDGET-GIT-LFS",
+      "scope": "org",
+      "title": "A budget limits Git LFS spend",
+      "severity": "low",
+      "kind": "list_match",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/organizations/{org}/settings/billing/budgets", "pointer": "budgets", "label": "budget_amount"},
+      "expect": {"any": [[{"pointer": "budget_product_sku", "op": "in", "value": ["git_lfs"]}]],
+                 "fail_note": "no Git LFS budget: storage and bandwidth beyond the included amount are billed without a limit"},
+      "fix": {"kind": "api", "params": {"budget_amount": null, "prevent_further_usage": true, "alert_recipients": null},
+              "steps": [{"method": "POST", "path": "/organizations/{org}/settings/billing/budgets", "body": {
+                "budget_type": "ProductPricing", "budget_product_sku": "git_lfs", "budget_scope": "organization",
+                "budget_amount": "{budget_amount}", "prevent_further_usage": "{prevent_further_usage}",
+                "budget_alerting": {"will_alert": true, "alert_recipients": "{alert_recipients}"}}}]},
+      "destructive": "With prevent_further_usage=true, LFS pushes and downloads are blocked for the rest of the month when the budget is used up.",
+      "source": [
+        "https://docs.github.com/en/rest/billing/budgets",
+        "https://docs.github.com/en/billing/concepts/product-billing/git-lfs"
+      ]
+    },
+    {
+      "id": "ORG-BUDGET-CODESPACES",
+      "scope": "org",
+      "title": "A budget limits org-paid Codespaces spend",
+      "severity": "low",
+      "kind": "list_match",
+      "availability": {"free": "free", "team": "free"},
+      "when": [{"var": "plan", "op": "eq", "value": "team"}],
+      "when_note": "on GitHub Free the user who creates a codespace always pays",
+      "read": {"path": "/organizations/{org}/settings/billing/budgets", "pointer": "budgets", "label": "budget_amount"},
+      "expect": {"any": [[{"pointer": "budget_product_sku", "op": "in", "value": ["codespaces"]}]],
+                 "fail_note": "no Codespaces budget: if the org pays for codespaces, there is no limit"},
+      "fix": {"kind": "api", "params": {"budget_amount": null, "prevent_further_usage": true, "alert_recipients": null},
+              "steps": [{"method": "POST", "path": "/organizations/{org}/settings/billing/budgets", "body": {
+                "budget_type": "ProductPricing", "budget_product_sku": "codespaces", "budget_scope": "organization",
+                "budget_amount": "{budget_amount}", "prevent_further_usage": "{prevent_further_usage}",
+                "budget_alerting": {"will_alert": true, "alert_recipients": "{alert_recipients}"}}}]},
+      "source": [
+        "https://docs.github.com/en/rest/billing/budgets",
+        "https://docs.github.com/en/codespaces/managing-codespaces-for-your-organization/choosing-who-owns-and-pays-for-codespaces-in-your-organization"
+      ]
+    },
+
+    {
+      "id": "REPO-BRANCH-PROTECTION",
+      "scope": "repo",
+      "title": "Default branch: no deletion, no force push, PR with at least 1 approval",
+      "severity": "high",
+      "kind": "branch_rules",
+      "availability": {"free": {"public": "free", "private": "unavailable"}, "team": "free"},
+      "expect": {"rules": [
+        {"type": "deletion"},
+        {"type": "non_fast_forward"},
+        {"type": "pull_request", "params": [{"param": "required_approving_review_count", "op": "gte", "value": 1}]}
+      ]},
+      "fix": {
+        "kind": "ruleset",
+        "params": {"review_count": 1, "require_code_owner_review": false, "require_last_push_approval": true, "bypass_actors": []},
+        "by_plan": {
+          "free": {"template": "ruleset-repo-default-branch.json", "path": "/repos/{owner}/{repo}/rulesets"},
+          "team": {"template": "ruleset-org-default-branch.json", "path": "/orgs/{org}/rulesets"}
+        }
+      },
+      "destructive": "Direct pushes to the default branch stop. With review_count=1 a solo maintainer cannot merge alone: ask the user how many people can review.",
+      "scorecard": ["Branch-Protection", "Code-Review"],
+      "source": [
+        "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets",
+        "https://docs.github.com/en/rest/repos/rules",
+        "https://docs.github.com/en/rest/orgs/rules",
+        "https://github.blog/changelog/2025-06-16-organization-rulesets-now-available-for-github-team-plans/",
+        "https://github.com/ossf/scorecard/blob/v5.6.0/docs/checks.md#branch-protection"
+      ]
+    },
+    {
+      "id": "REPO-STATUS-CHECKS",
+      "scope": "repo",
+      "title": "Default branch requires at least one passing status check",
+      "severity": "medium",
+      "kind": "branch_rules",
+      "availability": {"free": {"public": "free", "private": "unavailable"}, "team": "free"},
+      "expect": {"rules": [{"type": "required_status_checks"}]},
+      "fix": {"kind": "manual"},
+      "manual": "Needs the names of the repo's CI checks. Add a required_status_checks rule to the default-branch ruleset with the check contexts that CI reports.",
+      "scorecard": ["Branch-Protection", "CI-Tests"],
+      "source": [
+        "https://docs.github.com/en/rest/repos/rules",
+        "https://github.com/ossf/scorecard/blob/v5.6.0/docs/checks.md#branch-protection"
+      ]
+    },
+    {
+      "id": "REPO-DEPENDABOT-ALERTS",
+      "scope": "repo",
+      "title": "Dependabot alerts (and the dependency graph) are on",
+      "severity": "high",
+      "kind": "status_endpoint",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/repos/{owner}/{repo}/vulnerability-alerts"},
+      "expect": {"value": true},
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/repos/{owner}/{repo}/vulnerability-alerts"}]},
+      "scorecard": ["Vulnerabilities"],
+      "source": [
+        "https://docs.github.com/en/rest/repos/repos",
+        "https://docs.github.com/en/code-security/getting-started/github-security-features"
+      ]
+    },
+    {
+      "id": "REPO-DEPENDABOT-SECURITY-UPDATES",
+      "scope": "repo",
+      "title": "Dependabot security updates are on",
+      "severity": "medium",
+      "kind": "status_endpoint",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/repos/{owner}/{repo}/automated-security-fixes", "pointer": "enabled"},
+      "expect": {"value": true},
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/repos/{owner}/{repo}/automated-security-fixes"}]},
+      "scorecard": ["Vulnerabilities", "Dependency-Update-Tool"],
+      "source": [
+        "https://docs.github.com/en/rest/repos/repos",
+        "https://docs.github.com/en/code-security/concepts/supply-chain-security/dependabot-security-updates"
+      ]
+    },
+    {
+      "id": "REPO-DEPENDENCY-UPDATE-TOOL",
+      "scope": "repo",
+      "title": "A Dependabot or Renovate config file exists",
+      "severity": "medium",
+      "kind": "file_any",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"paths": [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", "renovate.json5",
+                         ".github/renovate.json", ".github/renovate.json5", ".renovaterc", ".renovaterc.json"]},
+      "fix": {"kind": "pr_file", "path": ".github/dependabot.yml", "template": "dependabot.yml",
+              "message": "Add Dependabot version updates"},
+      "scorecard": ["Dependency-Update-Tool", "Pinned-Dependencies"],
+      "source": [
+        "https://docs.github.com/en/code-security/dependabot/working-with-dependabot/keeping-your-actions-up-to-date-with-dependabot",
+        "https://github.com/ossf/scorecard/blob/v5.6.0/checks/raw/dependency_update_tool.go"
+      ]
+    },
+    {
+      "id": "REPO-SECRET-SCANNING",
+      "scope": "repo",
+      "title": "Secret scanning is on",
+      "severity": "high",
+      "kind": "field",
+      "availability": {"free": {"public": "free", "private": "unavailable"},
+                       "team": {"public": "free", "private": "paid:secret_protection"}},
+      "read": {"path": "/repos/{owner}/{repo}", "pointer": "security_and_analysis.secret_scanning.status"},
+      "expect": {"op": "eq", "value": "enabled"},
+      "fix": {"kind": "api", "steps": [{"method": "PATCH", "path": "/repos/{owner}/{repo}",
+                                        "body": {"security_and_analysis": {"secret_scanning": {"status": "enabled"}}}}]},
+      "source": [
+        "https://docs.github.com/en/rest/repos/repos#update-a-repository",
+        "https://docs.github.com/en/get-started/learning-about-github/about-github-advanced-security"
+      ]
+    },
+    {
+      "id": "REPO-PUSH-PROTECTION",
+      "scope": "repo",
+      "title": "Secret scanning push protection is on",
+      "severity": "high",
+      "kind": "field",
+      "availability": {"free": {"public": "free", "private": "unavailable"},
+                       "team": {"public": "free", "private": "paid:secret_protection"}},
+      "read": {"path": "/repos/{owner}/{repo}", "pointer": "security_and_analysis.secret_scanning_push_protection.status"},
+      "expect": {"op": "eq", "value": "enabled"},
+      "fix": {"kind": "api", "steps": [{"method": "PATCH", "path": "/repos/{owner}/{repo}",
+                                        "body": {"security_and_analysis": {"secret_scanning": {"status": "enabled"},
+                                                                           "secret_scanning_push_protection": {"status": "enabled"}}}}]},
+      "source": [
+        "https://docs.github.com/en/rest/repos/repos#update-a-repository",
+        "https://docs.github.com/en/code-security/concepts/secret-security/push-protection"
+      ]
+    },
+    {
+      "id": "REPO-CODE-SCANNING",
+      "scope": "repo",
+      "title": "Code scanning (CodeQL) runs: default setup or a CodeQL workflow",
+      "severity": "medium",
+      "kind": "field",
+      "availability": {"free": {"public": "free", "private": "unavailable"},
+                       "team": {"public": "free", "private": "paid:code_security"}},
+      "pass_if_files": [".github/workflows/codeql.yml", ".github/workflows/codeql-analysis.yml"],
+      "read": {"path": "/repos/{owner}/{repo}/code-scanning/default-setup", "pointer": "state"},
+      "expect": {"op": "eq", "value": "configured"},
+      "fix": {"kind": "api", "steps": [{"method": "PATCH", "path": "/repos/{owner}/{repo}/code-scanning/default-setup",
+                                        "body": {"state": "configured", "query_suite": "default"}}]},
+      "scorecard": ["SAST"],
+      "source": [
+        "https://docs.github.com/en/rest/code-scanning/code-scanning",
+        "https://docs.github.com/en/code-security/code-scanning/enabling-code-scanning/configuring-default-setup-for-code-scanning"
+      ]
+    },
+    {
+      "id": "REPO-PRIVATE-VULN-REPORTING",
+      "scope": "repo",
+      "title": "Private vulnerability reporting is on",
+      "severity": "medium",
+      "kind": "status_endpoint",
+      "availability": {"free": {"public": "free", "private": "unavailable"}, "team": {"public": "free", "private": "unavailable"}},
+      "read": {"path": "/repos/{owner}/{repo}/private-vulnerability-reporting", "pointer": "enabled"},
+      "expect": {"value": true},
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/repos/{owner}/{repo}/private-vulnerability-reporting"}]},
+      "scorecard": ["Security-Policy"],
+      "source": [
+        "https://docs.github.com/en/rest/repos/repos",
+        "https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/configure-vulnerability-reporting/configure-for-a-repository"
+      ]
+    },
+    {
+      "id": "REPO-SECURITY-POLICY",
+      "scope": "repo",
+      "title": "A security policy exists (in the repo or inherited from the org .github repo)",
+      "severity": "medium",
+      "kind": "file_any",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"paths": ["SECURITY.md", ".github/SECURITY.md", "docs/SECURITY.md"], "org_fallback": true},
+      "fix": {"kind": "manual"},
+      "manual": "Fix ORG-SECURITY-MD once for all repos, or add a repo-specific SECURITY.md.",
+      "scorecard": ["Security-Policy"],
+      "source": [
+        "https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file",
+        "https://github.com/ossf/scorecard/blob/v5.6.0/checks/raw/security_policy.go"
+      ]
+    },
+    {
+      "id": "REPO-LICENSE",
+      "scope": "repo",
+      "title": "Public repo has a license GitHub can detect",
+      "severity": "low",
+      "kind": "status_endpoint",
+      "availability": {"free": "free", "team": "free"},
+      "when": [{"var": "visibility", "op": "eq", "value": "public"}],
+      "when_note": "only public repos need a license for Scorecard",
+      "read": {"path": "/repos/{owner}/{repo}/license"},
+      "expect": {"value": true},
+      "fix": {"kind": "manual"},
+      "manual": "Choosing a license is a legal decision for the owner. Add LICENSE at the root with an OSI-approved license.",
+      "scorecard": ["License"],
+      "source": [
+        "https://docs.github.com/en/rest/licenses/licenses",
+        "https://github.com/ossf/scorecard/blob/v5.6.0/docs/checks.md#license"
+      ]
+    },
+    {
+      "id": "REPO-WORKFLOW-TOKEN-PERMISSIONS",
+      "scope": "repo",
+      "title": "Every workflow has a top-level read-only `permissions:` block",
+      "severity": "high",
+      "kind": "workflows",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"only": "permissions"},
+      "fix": {"kind": "manual"},
+      "manual": "Add `permissions: contents: read` (or `read-all`) at the top of each workflow and give writes per job. Open a PR; run `ghsetup.py workflows <checkout>` to check.",
+      "scorecard": ["Token-Permissions"],
+      "source": [
+        "https://docs.github.com/en/actions/reference/security/secure-use",
+        "https://github.com/ossf/scorecard/blob/v5.6.0/docs/checks.md#token-permissions"
+      ]
+    },
+    {
+      "id": "REPO-WORKFLOW-PINNED-ACTIONS",
+      "scope": "repo",
+      "title": "Workflows pin actions to a full commit SHA",
+      "severity": "medium",
+      "kind": "workflows",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"only": "pinning"},
+      "fix": {"kind": "manual"},
+      "manual": "In a checkout run `ghsetup.py pin <checkout> --write`, review the diff and open a PR. The Dependabot github-actions ecosystem keeps the SHAs current.",
+      "scorecard": ["Pinned-Dependencies"],
+      "source": [
+        "https://docs.github.com/en/actions/reference/security/secure-use",
+        "https://github.com/ossf/scorecard/blob/v5.6.0/docs/checks.md#pinned-dependencies"
+      ]
+    },
+    {
+      "id": "REPO-SCORECARD-WORKFLOW",
+      "scope": "repo",
+      "title": "The OpenSSF Scorecard workflow runs and publishes results",
+      "severity": "low",
+      "kind": "file_any",
+      "availability": {"free": {"public": "free", "private": "unavailable"},
+                       "team": {"public": "free", "private": "paid:code_security"}},
+      "read": {"paths": [".github/workflows/scorecard.yml", ".github/workflows/scorecards.yml", ".github/workflows/scorecard-analysis.yml"]},
+      "fix": {"kind": "pr_file", "path": ".github/workflows/scorecard.yml", "template": "scorecard.yml",
+              "message": "Add the OpenSSF Scorecard workflow"},
+      "source": [
+        "https://github.com/ossf/scorecard-action",
+        "https://github.com/ossf/scorecard/blob/main/.github/workflows/scorecard-analysis.yml"
+      ]
+    },
+    {
+      "id": "REPO-CODEOWNERS",
+      "scope": "repo",
+      "title": "A CODEOWNERS file exists",
+      "severity": "low",
+      "kind": "file_any",
+      "availability": {"free": {"public": "free", "private": "unavailable"}, "team": "free"},
+      "read": {"paths": [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]},
+      "fix": {"kind": "manual"},
+      "manual": "Needs the owning teams. Add .github/CODEOWNERS; make /.github/ owned by the maintainers so workflow changes need their review. Then set require_code_owner_review=true in the ruleset.",
+      "scorecard": ["Branch-Protection"],
+      "source": [
+        "https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners",
+        "https://docs.github.com/en/actions/reference/security/secure-use"
+      ]
+    },
+    {
+      "id": "REPO-ACTIONS-TOKEN-READ",
+      "scope": "repo",
+      "title": "Repo default GITHUB_TOKEN permission is read-only",
+      "severity": "medium",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/repos/{owner}/{repo}/actions/permissions/workflow", "pointer": "default_workflow_permissions"},
+      "expect": {"op": "eq", "value": "read"},
+      "fix": {"kind": "api", "steps": [{"method": "PUT", "path": "/repos/{owner}/{repo}/actions/permissions/workflow", "body": {"default_workflow_permissions": "read"}, "merge": true}]},
+      "destructive": "Workflows in this repo that write without a `permissions:` block start to fail.",
+      "scorecard": ["Token-Permissions"],
+      "source": [
+        "https://docs.github.com/en/rest/actions/permissions",
+        "https://docs.github.com/en/actions/reference/security/secure-use"
+      ]
+    },
+    {
+      "id": "REPO-DELETE-BRANCH-ON-MERGE",
+      "scope": "repo",
+      "title": "Head branches are deleted after merge",
+      "severity": "low",
+      "kind": "field",
+      "availability": {"free": "free", "team": "free"},
+      "read": {"path": "/repos/{owner}/{repo}", "pointer": "delete_branch_on_merge"},
+      "expect": {"op": "eq", "value": true},
+      "fix": {"kind": "api", "steps": [{"method": "PATCH", "path": "/repos/{owner}/{repo}", "body": {"delete_branch_on_merge": true}}]},
+      "source": ["https://docs.github.com/en/rest/repos/repos#update-a-repository"]
+    }
+  ]
+}
